@@ -39,8 +39,10 @@ fi
 # runtime：系统 JDK 生成 jlink 镜像（Chunker 子进程使用）
 if [ ! -f "$RUNTIME/bin/java" ] && [ ! -f "$RUNTIME/bin/java.exe" ] && command -v jlink >/dev/null 2>&1; then
   echo ">> 生成 jlink runtime"
+  rm -rf "$RUNTIME"   # checkout 自带 README.md，jlink 要求输出目录为空
+  mkdir -p "$RUNTIME"
   jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec \
-        --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 \
+        --no-header-files --no-man-pages --compress=zip-9 \
         --output "$RUNTIME"
 fi
 

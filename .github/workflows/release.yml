@@ -37,10 +37,10 @@ jobs:
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
           cmake -S $src -B "$src\build" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          # MSBuild 偶发 D8040（并行子进程抖动），重试 3 次并限制并发
+          # 上游 /MP 与跨项目并行叠加会触发 MSVC D8040；串行 + 重试最稳
           $ok = $false
           foreach ($attempt in 1..3) {
-            cmake --build "$src\build" --target b2j --config Release --parallel 4
+            cmake --build "$src\build" --target b2j --config Release --parallel 1
             if (Test-Path "$src\build\Release\b2j.exe") { $ok = $true; break }
             Write-Warning "b2j 构建第 $attempt 次未产出，重试"
           }
@@ -49,6 +49,7 @@ jobs:
       - name: Prepare runtime (jlink)
         shell: pwsh
         run: |
+          Remove-Item -Recurse -Force src-tauri\runtime
           & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
@@ -80,13 +81,13 @@ jobs:
         run: |
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
-          # MSBuild 偶发 D8040（并行子进程抖动），重试 3 次并限制并发
+          # 上游 /MP 与跨项目并行叠加会触发 MSVC D8040；串行 + 重试最稳
           $ok = $false
           foreach ($attempt in 1..3) {
             if (-not (Test-Path "$src\build-arm64")) {
               cmake -S $src -B "$src\build-arm64" -A ARM64 "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             }
-            cmake --build "$src\build-arm64" --target b2j --config Release --parallel 4
+            cmake --build "$src\build-arm64" --target b2j --config Release --parallel 1
             if (Test-Path "$src\build-arm64\Release\b2j.exe") { $ok = $true; break }
           }
           if ($ok) {
@@ -97,7 +98,7 @@ jobs:
             cmake -S $src -B "$src\build-x64" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             $ok = $false
             foreach ($attempt in 1..3) {
-              cmake --build "$src\build-x64" --target b2j --config Release --parallel 4
+              cmake --build "$src\build-x64" --target b2j --config Release --parallel 1
               if (Test-Path "$src\build-x64\Release\b2j.exe") { $ok = $true; break }
             }
             if (-not $ok) { throw "b2j x64 回退构建失败" }
@@ -106,6 +107,7 @@ jobs:
       - name: Prepare runtime (jlink arm64)
         shell: pwsh
         run: |
+          Remove-Item -Recurse -Force src-tauri\runtime
           & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
@@ -135,6 +137,7 @@ jobs:
         run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
+          rm -rf src-tauri/runtime
           "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
@@ -166,6 +169,7 @@ jobs:
         run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
+          rm -rf src-tauri/runtime
           "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
