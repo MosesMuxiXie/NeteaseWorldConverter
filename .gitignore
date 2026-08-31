@@ -5,7 +5,8 @@ src-tauri/backends/*
 src-tauri/runtime/*
 !src-tauri/runtime/README.md
 src-tauri/gen/
-vendor/
+vendor/*
+!vendor/backends-windows/
 dist/
 release/
 # E2E 测试产物与本地日志

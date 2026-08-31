@@ -31,34 +31,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
           Invoke-WebRequest "$env:CHUNKER_JAR_URL" -OutFile "src-tauri\backends\chunker-cli.jar"
-      - name: Build b2j from source (x64)
+      - name: Copy vendored b2j (x64)
         shell: pwsh
         run: |
-          $env:CL = '/MP1'   # 覆盖上游 CMakeLists 的 /MP，避免 D8040
-          $src = 'D:\a\je2be'   # 不放在 %TEMP%（Defender 实时扫描易诱发 cl 崩溃）
-          git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
-          cmake -S $src -B "$src\build" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          cmake --build "$src\build" --target b2j --config Release --parallel 1
-          # cl.exe 偶发 0xC0000005；级联回退 clang-cl → /O1
-          if (-not (Test-Path "$src\build\Release\b2j.exe")) {
-            Write-Warning "MSVC 构建失败，回退 clang-cl"
-            $clang = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\Llvm\x64\bin\clang-cl.exe'
-            if (Test-Path $clang) {
-              cmake -S $src -B "$src\build-clang" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" "-DCMAKE_C_COMPILER=$clang" "-DCMAKE_CXX_COMPILER=$clang"
-              cmake --build "$src\build-clang" --target b2j --config Release --parallel 1
-              if (Test-Path "$src\build-clang\Release\b2j.exe") { Copy-Item "$src\build-clang\Release\b2j.exe" src-tauri\backends\ -Force }
-            }
-          } else {
-            Copy-Item "$src\build\Release\b2j.exe" src-tauri\backends\ -Force
-          }
-          if (-not (Test-Path 'src-tauri\backends\b2j.exe')) {
-            Write-Warning "clang-cl 构建失败，回退 MSVC /O1"
-            cmake -S $src -B "$src\build-o1" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" "-DCMAKE_CXX_FLAGS_RELEASE=/O1 /Ob1 /DNDEBUG"
-            cmake --build "$src\build-o1" --target b2j --config Release --parallel 1
-            Copy-Item "$src\build-o1\Release\b2j.exe" src-tauri\backends\ -Force
-          }
-          if (-not (Test-Path 'src-tauri\backends\b2j.exe')) { throw "b2j 构建失败" }
-          Write-Host "b2j ready"
+          Copy-Item vendor\backends-windows\b2j.exe src-tauri\backends\ -Force
+          Copy-Item vendor\backends-windows\libc++.dll src-tauri\backends\ -Force
+          Copy-Item vendor\backends-windows\libunwind.dll src-tauri\backends\ -Force
       - name: Prepare runtime (jlink)
         shell: pwsh
         run: |
@@ -89,35 +67,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
           Invoke-WebRequest "$env:CHUNKER_JAR_URL" -OutFile "src-tauri\backends\chunker-cli.jar"
-      - name: Build b2j from source（优先原生 ARM64，失败回退 x64 经模拟运行）
+      - name: Copy vendored b2j（x64，经 Win11 ARM 模拟层运行）
         shell: pwsh
         run: |
-          $env:CL = '/MP1'
-          $src = 'D:\a\je2be'   # 不放在 %TEMP%（Defender 实时扫描易诱发 cl 崩溃）
-          git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
-          cmake -S $src -B "$src\build-arm64" -A ARM64 "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          cmake --build "$src\build-arm64" --target b2j --config Release --parallel 1
-          if (Test-Path "$src\build-arm64\Release\b2j.exe") {
-            Copy-Item "$src\build-arm64\Release\b2j.exe" src-tauri\backends\ -Force
-            Write-Host "b2j: native ARM64"
-          } else {
-            Write-Warning "ARM64 b2j 构建失败，回退 x64（经 Win11 ARM 模拟层运行）"
-            cmake -S $src -B "$src\build-x64" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-            cmake --build "$src\build-x64" --target b2j --config Release --parallel 1
-            if (Test-Path "$src\build-x64\Release\b2j.exe") {
-              Copy-Item "$src\build-x64\Release\b2j.exe" src-tauri\backends\ -Force
-            } else {
-              Write-Warning "x64 构建失败，回退 clang-cl"
-              $clang = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\Llvm\x64\bin\clang-cl.exe'
-              if (Test-Path $clang) {
-                cmake -S $src -B "$src\build-clang" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" "-DCMAKE_C_COMPILER=$clang" "-DCMAKE_CXX_COMPILER=$clang"
-                cmake --build "$src\build-clang" --target b2j --config Release --parallel 1
-                if (Test-Path "$src\build-clang\Release\b2j.exe") { Copy-Item "$src\build-clang\Release\b2j.exe" src-tauri\backends\ -Force }
-              }
-            }
-          }
-          if (-not (Test-Path 'src-tauri\backends\b2j.exe')) { throw "b2j 构建失败" }
-          Write-Host "b2j ready"
+          Copy-Item vendor\backends-windows\b2j.exe src-tauri\backends\ -Force
+          Copy-Item vendor\backends-windows\libc++.dll src-tauri\backends\ -Force
+          Copy-Item vendor\backends-windows\libunwind.dll src-tauri\backends\ -Force
       - name: Prepare runtime (jlink arm64)
         shell: pwsh
         run: |
