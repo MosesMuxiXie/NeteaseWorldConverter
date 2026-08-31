@@ -1,23 +1,18 @@
 # release.yml — 多平台发布：Windows x64 / Windows arm64 / macOS x64 / macOS arm64
-# 用法：push 到 GitHub 后手动触发（Actions → Release builds → Run workflow），
-# 或打 tag（v*）自动触发。产物为四组安装包，直接可作为 GitHub Release 附件。
+# 手动触发（Actions → Release builds → Run workflow）或打 v* tag 自动触发。
+# tag 触发时最后会创建 GitHub Release 并附上全部安装包。
 
 name: Release builds
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "版本号（默认取 Cargo.toml）"
-        required: false
-        default: ""
   push:
     tags:
       - "v*"
 
 env:
-  CHUNKER_URL: https://github.com/HiveGamesOSS/Chunker/releases/download/1.19.1/chunker-cli.zip
-  # 需要构建资源时使用的 JDK：Chunker 兼容 17+，此处用 21 LTS
+  CHUNKER_JAR_URL: https://github.com/HiveGamesOSS/Chunker/releases/download/1.19.1/chunker-cli-1.19.1.jar
+  JE2BE_VERSION: web-4.3.0
   JAVA_VERSION: "21"
 
 jobs:
@@ -29,29 +24,25 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: x86_64-pc-windows-msvc }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: "21", architecture: x64 }
-      - name: Prepare backends (Chunker + b2j x64)
+      - name: Prepare chunker-cli.jar
         shell: pwsh
         run: |
-          Invoke-WebRequest "$env:CHUNKER_URL" -OutFile "$env:TEMP\chunker-cli.zip"
-          Expand-Archive "$env:TEMP\chunker-cli.zip" "$env:TEMP\chunker"
           New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
-          Get-ChildItem "$env:TEMP\chunker" -Recurse -Filter chunker-cli.jar | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+          Invoke-WebRequest "$env:CHUNKER_JAR_URL" -OutFile "src-tauri\backends\chunker-cli.jar"
+      - name: Build b2j from source (x64)
+        shell: pwsh
+        run: |
+          $src = "$env:TEMP\je2be"
+          git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
+          cmake -S $src -B "$src\build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build "$src\build" --target b2j --config Release --parallel
+          Copy-Item "$src\build\Release\b2j.exe" src-tauri\backends\ -Force
       - name: Prepare runtime (jlink)
         shell: pwsh
         run: |
           jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
-      - name: Copy bundled b2j (from original portable package)
-        shell: pwsh
-        run: |
-          # 原版便携包路径可按需挂到 ${{ github.workspace }}/../NeteaseWorldConverter；
-          # 未提供时，Windows x64 用 je2be-core 官方 release 的 windows 版 b2j：
-          if (-not (Test-Path src-tauri\backends\b2j.exe)) {
-            Invoke-WebRequest "https://github.com/kbinani/je2be/releases/download/v0.12.4/je2be-0.12.4-windows-x64.zip" -OutFile "$env:TEMP\b2j.zip"
-            Expand-Archive "$env:TEMP\b2j.zip" "$env:TEMP\b2j"
-            Get-ChildItem "$env:TEMP\b2j" -Recurse -Filter b2j.exe | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
-          }
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target x86_64-pc-windows-msvc
@@ -70,28 +61,36 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-pc-windows-msvc }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: "21", architecture: arm64 }
-      - name: Prepare backends (Chunker)
+      - name: Prepare chunker-cli.jar
         shell: pwsh
         run: |
-          Invoke-WebRequest "$env:CHUNKER_URL" -OutFile "$env:TEMP\chunker-cli.zip"
-          Expand-Archive "$env:TEMP\chunker-cli.zip" "$env:TEMP\chunker"
           New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
-          Get-ChildItem "$env:TEMP\chunker" -Recurse -Filter chunker-cli.jar | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+          Invoke-WebRequest "$env:CHUNKER_JAR_URL" -OutFile "src-tauri\backends\chunker-cli.jar"
+      - name: Build b2j from source（优先原生 ARM64，失败回退 x64 经模拟运行）
+        shell: pwsh
+        run: |
+          $src = "$env:TEMP\je2be"
+          git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
+          cmake -S $src -B "$src\build-arm64" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build "$src\build-arm64" --target b2j --config Release --parallel
+          if (Test-Path "$src\build-arm64\Release\b2j.exe") {
+            Copy-Item "$src\build-arm64\Release\b2j.exe" src-tauri\backends\ -Force
+            Write-Host "b2j: native ARM64"
+          } else {
+            Write-Warning "ARM64 b2j 构建失败，回退 x64（经 Win11 ARM 模拟层运行）"
+            cmake -S $src -B "$src\build-x64" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+            cmake --build "$src\build-x64" --target b2j --config Release --parallel
+            Copy-Item "$src\build-x64\Release\b2j.exe" src-tauri\backends\ -Force
+          }
       - name: Prepare runtime (jlink arm64)
         shell: pwsh
         run: |
           jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
-      - name: b2j（x64，经 Windows 11 ARM 的 x64 模拟运行；需在 ARM 设备上自测）
-        shell: pwsh
-        run: |
-          Invoke-WebRequest "https://github.com/kbinani/je2be/releases/download/v0.12.4/je2be-0.12.4-windows-x64.zip" -OutFile "$env:TEMP\b2j.zip"
-          Expand-Archive "$env:TEMP\b2j.zip" "$env:TEMP\b2j"
-          Get-ChildItem "$env:TEMP\b2j" -Recurse -Filter b2j.exe | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
       - run: npm install --no-audit --no-fund
       - name: Build bundles
-        run: npx tauri build --target aarch64-pc-windows-msvc
+        run: npx tauri build --target aarch64-pc-windows-msvc --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
           name: windows-arm64
@@ -107,16 +106,14 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: x86_64-apple-darwin }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: "21", architecture: x64 }
-      - name: Prepare backends (Chunker)
+      - name: Prepare chunker-cli.jar
         run: |
           mkdir -p src-tauri/backends
-          curl -L "$CHUNKER_URL" -o /tmp/chunker-cli.zip
-          unzip -o /tmp/chunker-cli.zip -d /tmp/chunker
-          find /tmp/chunker -name 'chunker-cli.jar' -exec cp {} src-tauri/backends/ \;
+          curl -L "$CHUNKER_JAR_URL" -o src-tauri/backends/chunker-cli.jar
       - name: Build b2j from source (je2be-core, CMake)
-        run: bash scripts/build-b2j-macos.sh
+        run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
           jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
@@ -127,8 +124,8 @@ jobs:
         with:
           name: macos-x64
           path: |
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
 
   macos-arm64:
     runs-on: macos-14 # Apple Silicon 运行器
@@ -140,16 +137,14 @@ jobs:
         with: { node-version: 20 }
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-apple-darwin }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: "21", architecture: aarch64 }
-      - name: Prepare backends (Chunker)
+      - name: Prepare chunker-cli.jar
         run: |
           mkdir -p src-tauri/backends
-          curl -L "$CHUNKER_URL" -o /tmp/chunker-cli.zip
-          unzip -o /tmp/chunker-cli.zip -d /tmp/chunker
-          find /tmp/chunker -name 'chunker-cli.jar' -exec cp {} src-tauri/backends/ \;
+          curl -L "$CHUNKER_JAR_URL" -o src-tauri/backends/chunker-cli.jar
       - name: Build b2j from source (je2be-core, CMake)
-        run: bash scripts/build-b2j-macos.sh
+        run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
           jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
@@ -160,8 +155,8 @@ jobs:
         with:
           name: macos-arm64
           path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
 
   release:
     needs: [windows-x64, windows-arm64, macos-x64, macos-arm64]
