@@ -37,12 +37,19 @@ jobs:
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
           cmake -S $src -B "$src\build" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          cmake --build "$src\build" --target b2j --config Release --parallel
+          # MSBuild 偶发 D8040（并行子进程抖动），重试 3 次并限制并发
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            cmake --build "$src\build" --target b2j --config Release --parallel 4
+            if (Test-Path "$src\build\Release\b2j.exe") { $ok = $true; break }
+            Write-Warning "b2j 构建第 $attempt 次未产出，重试"
+          }
+          if (-not $ok) { throw "b2j 构建失败" }
           Copy-Item "$src\build\Release\b2j.exe" src-tauri\backends\ -Force
       - name: Prepare runtime (jlink)
         shell: pwsh
         run: |
-          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
+          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target x86_64-pc-windows-msvc
@@ -73,21 +80,33 @@ jobs:
         run: |
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
-          cmake -S $src -B "$src\build-arm64" -A ARM64 "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          cmake --build "$src\build-arm64" --target b2j --config Release --parallel
-          if (Test-Path "$src\build-arm64\Release\b2j.exe") {
+          # MSBuild 偶发 D8040（并行子进程抖动），重试 3 次并限制并发
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            if (-not (Test-Path "$src\build-arm64")) {
+              cmake -S $src -B "$src\build-arm64" -A ARM64 "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            }
+            cmake --build "$src\build-arm64" --target b2j --config Release --parallel 4
+            if (Test-Path "$src\build-arm64\Release\b2j.exe") { $ok = $true; break }
+          }
+          if ($ok) {
             Copy-Item "$src\build-arm64\Release\b2j.exe" src-tauri\backends\ -Force
             Write-Host "b2j: native ARM64"
           } else {
             Write-Warning "ARM64 b2j 构建失败，回退 x64（经 Win11 ARM 模拟层运行）"
             cmake -S $src -B "$src\build-x64" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-            cmake --build "$src\build-x64" --target b2j --config Release --parallel
+            $ok = $false
+            foreach ($attempt in 1..3) {
+              cmake --build "$src\build-x64" --target b2j --config Release --parallel 4
+              if (Test-Path "$src\build-x64\Release\b2j.exe") { $ok = $true; break }
+            }
+            if (-not $ok) { throw "b2j x64 回退构建失败" }
             Copy-Item "$src\build-x64\Release\b2j.exe" src-tauri\backends\ -Force
           }
       - name: Prepare runtime (jlink arm64)
         shell: pwsh
         run: |
-          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
+          & "$env:JAVA_HOME\bin\jlink.exe" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target aarch64-pc-windows-msvc --bundles nsis
@@ -116,7 +135,7 @@ jobs:
         run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
-          "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+          "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target x86_64-apple-darwin
@@ -147,7 +166,7 @@ jobs:
         run: bash scripts/build-b2j-macos.sh "$JE2BE_VERSION"
       - name: Prepare runtime (jlink)
         run: |
-          "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+          "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target aarch64-apple-darwin
