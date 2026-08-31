@@ -1,0 +1,179 @@
+# release.yml — 多平台发布：Windows x64 / Windows arm64 / macOS x64 / macOS arm64
+# 用法：push 到 GitHub 后手动触发（Actions → Release builds → Run workflow），
+# 或打 tag（v*）自动触发。产物为四组安装包，直接可作为 GitHub Release 附件。
+
+name: Release builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（默认取 Cargo.toml）"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+env:
+  CHUNKER_URL: https://github.com/HiveGamesOSS/Chunker/releases/download/1.19.1/chunker-cli.zip
+  # 需要构建资源时使用的 JDK：Chunker 兼容 17+，此处用 21 LTS
+  JAVA_VERSION: "21"
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-pc-windows-msvc }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", architecture: x64 }
+      - name: Prepare backends (Chunker + b2j x64)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "$env:CHUNKER_URL" -OutFile "$env:TEMP\chunker-cli.zip"
+          Expand-Archive "$env:TEMP\chunker-cli.zip" "$env:TEMP\chunker"
+          New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
+          Get-ChildItem "$env:TEMP\chunker" -Recurse -Filter chunker-cli.jar | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+      - name: Prepare runtime (jlink)
+        shell: pwsh
+        run: |
+          jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
+      - name: Copy bundled b2j (from original portable package)
+        shell: pwsh
+        run: |
+          # 原版便携包路径可按需挂到 ${{ github.workspace }}/../NeteaseWorldConverter；
+          # 未提供时，Windows x64 用 je2be-core 官方 release 的 windows 版 b2j：
+          if (-not (Test-Path src-tauri\backends\b2j.exe)) {
+            Invoke-WebRequest "https://github.com/kbinani/je2be/releases/download/v0.12.4/je2be-0.12.4-windows-x64.zip" -OutFile "$env:TEMP\b2j.zip"
+            Expand-Archive "$env:TEMP\b2j.zip" "$env:TEMP\b2j"
+            Get-ChildItem "$env:TEMP\b2j" -Recurse -Filter b2j.exe | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+          }
+      - run: npm install --no-audit --no-fund
+      - name: Build bundles
+        run: npx tauri build --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+  windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-pc-windows-msvc }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", architecture: arm64 }
+      - name: Prepare backends (Chunker)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "$env:CHUNKER_URL" -OutFile "$env:TEMP\chunker-cli.zip"
+          Expand-Archive "$env:TEMP\chunker-cli.zip" "$env:TEMP\chunker"
+          New-Item -ItemType Directory -Force src-tauri\backends | Out-Null
+          Get-ChildItem "$env:TEMP\chunker" -Recurse -Filter chunker-cli.jar | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+      - name: Prepare runtime (jlink arm64)
+        shell: pwsh
+        run: |
+          jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri\runtime
+      - name: b2j（x64，经 Windows 11 ARM 的 x64 模拟运行；需在 ARM 设备上自测）
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/kbinani/je2be/releases/download/v0.12.4/je2be-0.12.4-windows-x64.zip" -OutFile "$env:TEMP\b2j.zip"
+          Expand-Archive "$env:TEMP\b2j.zip" "$env:TEMP\b2j"
+          Get-ChildItem "$env:TEMP\b2j" -Recurse -Filter b2j.exe | ForEach-Object { Copy-Item $_.FullName src-tauri\backends\ }
+      - run: npm install --no-audit --no-fund
+      - name: Build bundles
+        run: npx tauri build --target aarch64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64
+          path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+  macos-x64:
+    runs-on: macos-14 # arm64 运行器 + Rosetta 2 交叉构建 Intel 产物
+    env:
+      ARCH: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-apple-darwin }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", architecture: x64 }
+      - name: Prepare backends (Chunker)
+        run: |
+          mkdir -p src-tauri/backends
+          curl -L "$CHUNKER_URL" -o /tmp/chunker-cli.zip
+          unzip -o /tmp/chunker-cli.zip -d /tmp/chunker
+          find /tmp/chunker -name 'chunker-cli.jar' -exec cp {} src-tauri/backends/ \;
+      - name: Build b2j from source (je2be-core, CMake)
+        run: bash scripts/build-b2j-macos.sh
+      - name: Prepare runtime (jlink)
+        run: |
+          jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+      - run: npm install --no-audit --no-fund
+      - name: Build bundles
+        run: npx tauri build --target x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64
+          path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+
+  macos-arm64:
+    runs-on: macos-14 # Apple Silicon 运行器
+    env:
+      ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: aarch64-apple-darwin }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", architecture: aarch64 }
+      - name: Prepare backends (Chunker)
+        run: |
+          mkdir -p src-tauri/backends
+          curl -L "$CHUNKER_URL" -o /tmp/chunker-cli.zip
+          unzip -o /tmp/chunker-cli.zip -d /tmp/chunker
+          find /tmp/chunker -name 'chunker-cli.jar' -exec cp {} src-tauri/backends/ \;
+      - name: Build b2j from source (je2be-core, CMake)
+        run: bash scripts/build-b2j-macos.sh
+      - name: Prepare runtime (jlink)
+        run: |
+          jlink --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --strip-native-commands=false --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+      - run: npm install --no-audit --no-fund
+      - name: Build bundles
+        run: npx tauri build --target aarch64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+  release:
+    needs: [windows-x64, windows-arm64, macos-x64, macos-arm64]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

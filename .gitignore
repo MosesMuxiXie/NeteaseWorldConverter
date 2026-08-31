@@ -1,0 +1,15 @@
+node_modules/
+src-tauri/target/
+src-tauri/backends/*
+!src-tauri/backends/README.md
+src-tauri/runtime/*
+!src-tauri/runtime/README.md
+src-tauri/gen/
+vendor/
+dist/
+release/
+# E2E 测试产物与本地日志
+.e2e-*/
+e2e-*.zip
+*-error-*.log
+*.log

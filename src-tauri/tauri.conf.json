@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NeteaseWorldConverter",
+  "version": "1.0.0",
+  "identifier": "com.openai.nwc.tauri",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "网易 Minecraft 存档转换器",
+        "width": 1000,
+        "height": 800,
+        "minWidth": 880,
+        "minHeight": 680,
+        "dragDropEnabled": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self'; img-src 'self' data:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": ["backends", "runtime"],
+    "publisher": "Netease World Converter contributors",
+    "copyright": "GPL-3.0-or-later",
+    "category": "Utility",
+    "shortDescription": "网易 Minecraft 存档解密与 Java 版本转换器",
+    "longDescription": "选择或拖入网易 Minecraft 存档的 .zip/.mcworld 文件后，程序在本机安全解压、自动识别存档类型，并输出所选 Java 版本的 ZIP。原版 Java Swing 应用的 Tauri 跨平台移植。",
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese", "English"],
+        "installMode": "both"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

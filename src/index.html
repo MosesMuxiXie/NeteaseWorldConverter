@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>网易 Minecraft 存档转换器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="drop-overlay" class="drop-overlay hidden">
+    <div class="drop-box">松开以选择存档 ZIP</div>
+  </div>
+
+  <main class="root">
+    <header class="header">
+      <h1>网易 Minecraft 存档转换器</h1>
+      <p class="subtitle">ZIP 全程仅在本机处理 · 自动识别网易基岩 / Java · 输出 Java 26.2—1.12</p>
+    </header>
+
+    <section class="card config">
+      <div class="row">
+        <label for="input-field">存档 ZIP</label>
+        <input id="input-field" type="text" readonly placeholder="尚未选择存档" />
+        <button id="choose-btn" class="primary">选择 / 上传 ZIP</button>
+      </div>
+      <div class="row">
+        <label>识别结果</label>
+        <span id="detection-label" class="detection idle">尚未选择存档</span>
+      </div>
+      <div class="row">
+        <label></label>
+        <span id="details-label" class="details"></span>
+      </div>
+      <div class="row">
+        <label for="target-box">目标 Java</label>
+        <select id="target-box" disabled></select>
+      </div>
+      <div class="row">
+        <label></label>
+        <span id="warning-label" class="warning">
+          降级到旧版本时，目标版本不存在的新方块、物品和实体无法无损表达。
+        </span>
+      </div>
+    </section>
+
+    <section class="progress-panel">
+      <div id="stage-label" class="stage">等待选择 ZIP</div>
+      <div class="progress-track"><div id="progress-bar" class="progress-fill" style="width:0%"></div></div>
+      <div id="progress-text" class="progress-text">0%</div>
+    </section>
+
+    <section class="log-panel">
+      <div class="log-title">详细进度 / 日志</div>
+      <pre id="log-area"></pre>
+    </section>
+
+    <footer class="actions">
+      <button id="start-btn" class="primary" disabled>开始转换</button>
+      <button id="save-btn" class="success" disabled>下载 / 保存 ZIP</button>
+      <button id="report-btn" disabled>打开错误报告</button>
+      <span class="spacer"></span>
+      <span class="privacy" id="backend-note">原始 ZIP 永不修改</span>
+    </footer>
+  </main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <div id="modal-title" class="modal-title"></div>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="plain">取消</button>
+        <button id="modal-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

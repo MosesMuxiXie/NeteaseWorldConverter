@@ -1,0 +1,16 @@
+{
+  "name": "netease-world-converter-tauri",
+  "version": "1.0.0",
+  "private": true,
+  "description": "网易 Minecraft 存档转换器（Tauri 跨平台版）",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "prepare:win": "powershell -ExecutionPolicy Bypass -File scripts/prepare-resources.ps1",
+    "prepare:unix": "bash scripts/prepare-resources.sh"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
