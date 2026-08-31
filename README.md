@@ -2,6 +2,8 @@
 
 网易 Minecraft 存档转换器（`NeteaseWorldConverter.exe`，Java 17 + Swing，GPL-3.0）的 **Tauri 2 跨平台移植**。
 
+仓库：<https://github.com/MosesMuxiXie/NeteaseWorldConverter>（发布包见 Releases）
+
 输入网易 Minecraft 存档的 `.zip` / `.mcworld` 文件后，程序在本机完成：
 
 1. **安全解压**（条目数 / 解压体积上限、Zip Slip、绝对路径、重复路径全部拒绝，原 ZIP 永不修改）
