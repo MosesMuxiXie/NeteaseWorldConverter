@@ -34,10 +34,10 @@ jobs:
       - name: Build b2j from source (x64)
         shell: pwsh
         run: |
+          $env:CL = '/MP1'   # 覆盖上游 CMakeLists 的 /MP，避免 D8040（并行子进程耗尽）
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
           cmake -S $src -B "$src\build" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-          # 上游 /MP 与跨项目并行叠加会触发 MSVC D8040；串行 + 重试最稳
           $ok = $false
           foreach ($attempt in 1..3) {
             cmake --build "$src\build" --target b2j --config Release --parallel 1
@@ -79,9 +79,9 @@ jobs:
       - name: Build b2j from source（优先原生 ARM64，失败回退 x64 经模拟运行）
         shell: pwsh
         run: |
+          $env:CL = '/MP1'   # 覆盖上游 CMakeLists 的 /MP，避免 D8040（并行子进程耗尽）
           $src = "$env:TEMP\je2be"
           git clone --depth 1 --branch "$env:JE2BE_VERSION" https://github.com/kbinani/je2be-core.git $src
-          # 上游 /MP 与跨项目并行叠加会触发 MSVC D8040；串行 + 重试最稳
           $ok = $false
           foreach ($attempt in 1..3) {
             if (-not (Test-Path "$src\build-arm64")) {
