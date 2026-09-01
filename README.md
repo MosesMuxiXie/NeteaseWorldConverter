@@ -70,30 +70,9 @@ npm run build
 
 **一键出全部四个平台**：推送到 GitHub 后，在 Actions → *Release builds* → Run workflow 手动触发（产物在各任务 Artifacts 下载）；打 `v*` tag 会自动跑并创建 GitHub Release。工作流见 `.github/workflows/release.yml`。
 
-本地构建：
-
-```powershell
-# Windows x64（本仓库实测路径）
-npm install
-npm run prepare:win
-npm run build
-```
-
-```bash
-# macOS（Intel / Apple Silicon 均可，在对应机器上执行）
-npm install
-npm run prepare:unix    # 自动：chunker-cli.jar 官方 Release + je2be-core 源码构建 b2j + jlink runtime
-npm run build
-```
-
-`backends/` 与 `runtime/` 内容不入库（见 `.gitignore`），构建前必须运行 prepare 脚本。
-`runtime/` 缺失时程序会自动回退到系统 `java`（PATH 或 JAVA_HOME）。
-
 ## 测试
 
-- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密密钥恢复、Anvil 验证器、版本比较）。
-  注：部分机器上 `cargo test` 的测试二进制会在加载器阶段以 STATUS_ENTRYPOINT_NOT_FOUND 失败
-  （与 tauri/wry 链接产物有关，主程序不受影响）；此时改用下述 E2E 验证。
+- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密密钥恢复、Anvil 验证器、版本比较，7 项）。
 - **端到端（推荐）**：用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` 启动应用后：
   - `node scripts/make-test-world.mjs` — 生成最小 Java 1.21 测试世界 ZIP
   - `node scripts/devtools-e2e.mjs 9223 <输入.zip> <输出.zip> <目标版本>` — 走完整 analyze→convert→save 流程
