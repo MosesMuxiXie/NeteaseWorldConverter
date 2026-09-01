@@ -16,6 +16,8 @@ pub mod validate;
 pub mod version;
 
 pub fn run() {
+    // 清扫历史实例残留的临时目录（孤儿目录与超龄会话目录）
+    engine::cleanup_stale_temp();
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::analyze,

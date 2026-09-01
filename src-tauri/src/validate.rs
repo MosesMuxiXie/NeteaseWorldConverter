@@ -6,25 +6,30 @@ use crate::models::ValidationResult;
 use crate::nbt;
 use crate::sink::Sink;
 use flate2::read::{GzDecoder, ZlibDecoder};
+use rayon::prelude::*;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 pub fn validate(world: &Path, sink: &Sink) -> Result<ValidationResult> {
     let level = nbt::read_java_level(&world.join("level.dat"))
-        .map_err(|error| ConversionError(format!("输出 level.dat 无法解析：{error}")))?;
+        .map_err(|error| ConversionError::from(format!("输出 level.dat 无法解析：{error}")))?;
 
     let mut regions: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(world).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(world)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
         let relative = entry
             .path()
             .strip_prefix(world)
-            .map_err(|_| ConversionError("验证内部路径错误".into()))?;
+            .map_err(|_| ConversionError::from("验证内部路径错误"))?;
         if relative
             .components()
             .next()
@@ -50,18 +55,23 @@ pub fn validate(world: &Path, sink: &Sink) -> Result<ValidationResult> {
     regions.sort();
 
     let total = regions.len();
-    let mut region_chunks: i64 = 0;
-    for (index, region) in regions.iter().enumerate() {
+    // 各区域相互独立，并行校验（大世界的主要收尾瓶颈即在此）
+    let region_chunks = AtomicI64::new(0);
+    let completed = AtomicUsize::new(0);
+    regions.par_iter().try_for_each::<_, Result<()>>(|region| {
         sink.check_cancel()?;
         let chunks = validate_region(region)?;
-        region_chunks += chunks as i64;
-        let percent = 85 + (9i64 * (index as i64 + 1) / total as i64) as i32;
+        let _ = region_chunks.fetch_add(chunks as i64, Ordering::Relaxed);
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        let percent = 85 + (9i64 * done as i64 / total as i64) as i32;
         sink.update(
             percent,
             "验证 Anvil 区域",
-            &format!("{} / {} 个区域文件", index + 1, total),
+            &format!("{done} / {total} 个区域文件"),
         );
-    }
+        Ok(())
+    })?;
+    let region_chunks = region_chunks.load(Ordering::Relaxed);
 
     let (files, bytes) = count_output(world)?;
     let level_version = if level.version_name.is_empty() {
@@ -146,7 +156,7 @@ fn validate_region(path: &Path) -> Result<usize> {
         file.read_exact(&mut compression_byte)?;
         let external = compression_byte[0] & 0x80 != 0;
         let compression = compression_byte[0] & 0x7f;
-        if !matches!(compression, 1 | 2 | 3) {
+        if !matches!(compression, 1..=3) {
             return conv(format!(
                 "区域文件 {name} 第 {index} 项压缩类型非法（{compression}）"
             ));
@@ -174,10 +184,12 @@ fn validate_external_chunk(
     compression: u8,
 ) -> Result<()> {
     let mcc = mcc_path(region_path).ok_or_else(|| {
-        ConversionError(format!("区域文件 {name} 第 {index} 项引用外部区块，但无法推导 .mcc 文件名"))
+        ConversionError::from(format!(
+            "区域文件 {name} 第 {index} 项引用外部区块，但无法推导 .mcc 文件名"
+        ))
     })?;
     let mut external = fs::File::open(&mcc).map_err(|_| {
-        ConversionError(format!(
+        ConversionError::from(format!(
             "区域文件 {name} 第 {index} 项外部区块文件缺失：{}",
             mcc.display()
         ))
@@ -185,9 +197,9 @@ fn validate_external_chunk(
     external.seek(SeekFrom::Start(start))?;
     let mut payload = external.take(payload_length);
     let mut first = [0u8; 1];
-    let read = payload
-        .read(&mut first)
-        .map_err(|_| ConversionError(format!("区域文件 {name} 第 {index} 项外部区块读取失败")))?;
+    let read = payload.read(&mut first).map_err(|_| {
+        ConversionError::from(format!("区域文件 {name} 第 {index} 项外部区块读取失败"))
+    })?;
     if read == 0 {
         return conv(format!("区域文件 {name} 第 {index} 项外部区块为空"));
     }
@@ -201,15 +213,23 @@ fn validate_external_chunk(
     Ok(())
 }
 
-fn validate_chunk_nbt(compression: u8, reader: &mut dyn Read, name: &str, index: usize) -> Result<()> {
+fn validate_chunk_nbt(
+    compression: u8,
+    reader: &mut dyn Read,
+    name: &str,
+    index: usize,
+) -> Result<()> {
     let result = match compression {
         1 => nbt::validate_root(GzDecoder::new(reader)),
         2 => nbt::validate_root(ZlibDecoder::new(reader)),
         3 => nbt::validate_root(reader),
         _ => unreachable!(),
     };
-    result
-        .map_err(|error| ConversionError(format!("区域文件 {name} 第 {index} 项 NBT 校验失败：{error}")))
+    result.map_err(|error| {
+        ConversionError::from(format!(
+            "区域文件 {name} 第 {index} 项 NBT 校验失败：{error}"
+        ))
+    })
 }
 
 /// r.0.0.mca → c.0.0.mcc（同级目录）。
@@ -230,14 +250,17 @@ fn mcc_path(region: &Path) -> Option<PathBuf> {
 fn count_output(world: &Path) -> Result<(i64, i64)> {
     let mut files: i64 = 0;
     let mut bytes: i64 = 0;
-    for entry in WalkDir::new(world).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(world)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
         let relative = entry
             .path()
             .strip_prefix(world)
-            .map_err(|_| ConversionError("验证内部路径错误".into()))?;
+            .map_err(|_| ConversionError::from("验证内部路径错误"))?;
         if relative
             .components()
             .next()

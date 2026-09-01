@@ -3,35 +3,51 @@
 use crate::error::Result;
 use crate::sink::Sink;
 use crate::version::parse_version;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const DIMENSIONS: [&str; 3] = ["overworld", "the_nether", "the_end"];
 const KINDS: [&str; 2] = ["entities", "poi"];
 const EXTRA_DIRS: [&str; 3] = ["playerdata", "advancements", "stats"];
+const LEGACY_DIMENSION_ROOTS: [&str; 3] = ["world", "DIM-1", "DIM1"];
 
-fn legacy_dimension(dim: &str) -> Option<&'static str> {
-    match dim {
-        "overworld" => Some("world"),
-        "the_nether" => Some("DIM-1"),
-        "the_end" => Some("DIM1"),
-        _ => None,
+/// 收集输入世界中所有实体/POI 目录（任意命名空间、任意维度，含数据驱动维度），
+/// 返回以源路径去重后的列表。新式 `dimensions/<ns>/<dim>/<kind>` 与
+/// 旧式 `world|DIM-1|DIM1/<kind>` 都会覆盖——保证"绝不静默丢弃"覆盖到模组数据。
+fn collect_entity_dirs(world: &Path) -> Vec<PathBuf> {
+    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Ok(namespaces) = fs::read_dir(world.join("dimensions")) {
+        for namespace in namespaces.filter_map(|entry| entry.ok()) {
+            let namespace_path = namespace.path();
+            if !namespace_path.is_dir() {
+                continue;
+            }
+            if let Ok(dimensions) = fs::read_dir(&namespace_path) {
+                for dimension in dimensions.filter_map(|entry| entry.ok()) {
+                    let dimension_path = dimension.path();
+                    if !dimension_path.is_dir() {
+                        continue;
+                    }
+                    for kind in KINDS {
+                        let dir = dimension_path.join(kind);
+                        if dir.is_dir() {
+                            found.insert(dir);
+                        }
+                    }
+                }
+            }
+        }
     }
-}
-
-/// 在输入世界内定位某维度某类文件（新式 dimensions/... 优先，旧式 world/DIM-1/DIM1 回退）。
-fn find_dir(world: &Path, dim: &str, kind: &str) -> Option<PathBuf> {
-    let modern = world.join("dimensions/minecraft").join(dim).join(kind);
-    if modern.is_dir() {
-        return Some(modern);
+    for legacy_root in LEGACY_DIMENSION_ROOTS {
+        for kind in KINDS {
+            let dir = world.join(legacy_root).join(kind);
+            if dir.is_dir() {
+                found.insert(dir);
+            }
+        }
     }
-    let legacy = world.join(legacy_dimension(dim)?).join(kind);
-    if legacy.is_dir() {
-        Some(legacy)
-    } else {
-        None
-    }
+    found.into_iter().collect()
 }
 
 fn copy_dir_tree(source: &Path, destination: &Path, sink: &Sink) -> Result<()> {
@@ -46,7 +62,7 @@ fn copy_dir_tree(source: &Path, destination: &Path, sink: &Sink) -> Result<()> {
         sink.check_cancel()?;
         let relative = file
             .strip_prefix(source)
-            .map_err(|_| crate::error::ConversionError("实体保留内部路径错误".into()))?;
+            .map_err(|_| crate::error::ConversionError::from("实体保留内部路径错误"))?;
         let target = destination.join(relative);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -77,19 +93,16 @@ pub fn preserve(
         _ => true,
     };
 
+    let entity_dirs = collect_entity_dirs(input_world);
     if downgrade {
         let mut preserved = false;
-        for dim in DIMENSIONS {
-            for kind in KINDS {
-                if let Some(source) = find_dir(input_world, dim, kind) {
-                    let relative = source
-                        .strip_prefix(input_world)
-                        .map_err(|_| crate::error::ConversionError("实体保留内部路径错误".into()))?;
-                    let destination = output_world.join("_NWC_preserved_source").join(relative);
-                    copy_dir_tree(&source, &destination, sink)?;
-                    preserved = true;
-                }
-            }
+        for source in &entity_dirs {
+            let relative = source
+                .strip_prefix(input_world)
+                .map_err(|_| crate::error::ConversionError::from("实体保留内部路径错误"))?;
+            let destination = output_world.join("_NWC_preserved_source").join(relative);
+            copy_dir_tree(source, &destination, sink)?;
+            preserved = true;
         }
         for extra in EXTRA_DIRS {
             let source = input_world.join(extra);
@@ -100,7 +113,9 @@ pub fn preserve(
             }
         }
         if preserved {
-            let readme = output_world.join("_NWC_preserved_source").join("README.txt");
+            let readme = output_world
+                .join("_NWC_preserved_source")
+                .join("README.txt");
             if let Some(parent) = readme.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -113,18 +128,19 @@ pub fn preserve(
         }
         Ok(preserved)
     } else {
-        // 升级（源 ≤ 目标）：用源文件覆盖输出的实体/POI/玩家目录
-        for dim in DIMENSIONS {
+        // 升级（源 ≤ 目标）：用源文件覆盖输出的实体/POI 目录（保持同相对路径，
+        // 因此任意命名空间/维度都能落回原位），并清理输出中的旧式布局残留
+        for source in &entity_dirs {
+            let relative = source
+                .strip_prefix(input_world)
+                .map_err(|_| crate::error::ConversionError::from("实体保留内部路径错误"))?;
+            let destination = output_world.join(relative);
+            let _ = fs::remove_dir_all(&destination);
+            copy_dir_tree(source, &destination, sink)?;
+        }
+        for legacy_root in LEGACY_DIMENSION_ROOTS {
             for kind in KINDS {
-                if let Some(source) = find_dir(input_world, dim, kind) {
-                    let destination = output_world.join("dimensions/minecraft").join(dim).join(kind);
-                    let _ = fs::remove_dir_all(&destination);
-                    copy_dir_tree(&source, &destination, sink)?;
-                    if let Some(legacy) = legacy_dimension(dim) {
-                        let legacy_destination = output_world.join(legacy).join(kind);
-                        let _ = fs::remove_dir_all(&legacy_destination);
-                    }
-                }
+                let _ = fs::remove_dir_all(output_world.join(legacy_root).join(kind));
             }
         }
         for extra in EXTRA_DIRS {
@@ -139,3 +155,71 @@ pub fn preserve(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::AppLog;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    fn test_sink(dir: &Path) -> Sink {
+        let log = Arc::new(AppLog::new(&dir.join("test.log")).unwrap());
+        Sink::new(
+            "test".into(),
+            Arc::new(AtomicBool::new(false)),
+            log,
+            |_payload| {},
+        )
+    }
+
+    #[test]
+    fn preserve_covers_all_namespaces_on_downgrade() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for relative in [
+            "dimensions/minecraft/overworld/entities",
+            "dimensions/mynamespace/custom_dim/entities",
+            "dimensions/minecraft/the_end/poi",
+            "world/entities",
+        ] {
+            let dir = input.path().join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("r.0.0.mca"), b"entity-data").unwrap();
+        }
+        let sink = test_sink(output.path());
+        let preserved = preserve(input.path(), output.path(), "1.21.10", "1.20.6", &sink).unwrap();
+        assert!(preserved);
+        let preserved_root = output.path().join("_NWC_preserved_source");
+        for relative in [
+            "dimensions/minecraft/overworld/entities/r.0.0.mca",
+            "dimensions/mynamespace/custom_dim/entities/r.0.0.mca",
+            "dimensions/minecraft/the_end/poi/r.0.0.mca",
+            "world/entities/r.0.0.mca",
+        ] {
+            assert!(
+                preserved_root.join(relative).exists(),
+                "缺少保留数据：{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_preserves_custom_namespace_in_place() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let custom = input
+            .path()
+            .join("dimensions/mynamespace/custom_dim/entities");
+        fs::create_dir_all(&custom).unwrap();
+        fs::write(custom.join("r.0.0.mca"), b"entity-data").unwrap();
+        let sink = test_sink(output.path());
+        let preserved = preserve(input.path(), output.path(), "1.20.6", "1.21.10", &sink).unwrap();
+        assert!(!preserved);
+        // 升级路径按原相对路径落位，不丢失自定义命名空间
+        let copied = output
+            .path()
+            .join("dimensions/mynamespace/custom_dim/entities/r.0.0.mca");
+        assert!(copied.exists());
+        assert_eq!(fs::read(&copied).unwrap(), b"entity-data");
+    }
+}

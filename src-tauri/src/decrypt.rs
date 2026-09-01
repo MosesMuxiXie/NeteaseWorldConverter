@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 const LEVELDB_FOOTER: [u8; 8] = [0x57, 0xFB, 0x80, 0x8B, 0x24, 0x75, 0x47, 0xDB];
 
@@ -25,18 +28,14 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
         );
     }
     let source_root = &world.root;
-    let Some(source_db) = world
-        .database_directory
-        .as_ref()
-        .filter(|db| db.is_dir())
-    else {
+    let Some(source_db) = world.database_directory.as_ref().filter(|db| db.is_dir()) else {
         return conv("基岩数据库目录缺失");
     };
     fs::create_dir_all(output)?;
     let output_db = output.join("db");
     fs::create_dir_all(&output_db)?;
 
-    copy_world_metadata(source_root, &source_db, output, sink)?;
+    copy_world_metadata(source_root, source_db, output, sink)?;
 
     let root_level = source_root.join("level.dat");
     let nested_level = source_db.join("level.dat");
@@ -52,10 +51,14 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
         fs::copy(&old_level, output.join("level.dat_old"))?;
     }
 
-    let db_files = collect_database_files(source_root, &source_db);
+    let db_files = collect_database_files(source_root, source_db);
     let manifest_name = choose_manifest_name(&db_files)?;
-    let encrypted = db_files.values().any(|path| starts_with_header(path, &NETEASE_HEADER));
-    let legacy = db_files.values().any(|path| starts_with_header(path, &LEGACY_AES_HEADER));
+    let encrypted = db_files
+        .values()
+        .any(|path| starts_with_header(path, &NETEASE_HEADER));
+    let legacy = db_files
+        .values()
+        .any(|path| starts_with_header(path, &LEGACY_AES_HEADER));
     if legacy {
         return conv("数据库中混有旧版 AES-CFB8 文件，不能安全解密");
     }
@@ -72,34 +75,50 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
         key = Some(recovery.key);
     }
 
-    let ordered: Vec<(String, PathBuf)> = db_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let mut decrypted_files = 0usize;
-    let mut copied_files = 0usize;
+    let ordered: Vec<(String, PathBuf)> = db_files
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let total = ordered.len();
-    for (index, (name, source)) in ordered.iter().enumerate() {
-        sink.check_cancel()?;
-        let lower = name.to_lowercase();
-        if lower == "level.dat" || lower == ".ds_store" || lower == "lock" {
-            continue;
-        }
-        let target = output_db.join(name);
-        if starts_with_header(source, &NETEASE_HEADER) {
-            let Some(key_bytes) = &key else {
-                return conv(format!("发现加密文件但未恢复出密钥：{name}"));
-            };
-            decrypt_file(source, &target, key_bytes)?;
-            decrypted_files += 1;
-        } else {
-            fs::copy(source, &target)?;
-            copied_files += 1;
-        }
-        let percent = 13 + (17i64 * (index + 1) as i64 / total.max(1) as i64) as i32;
-        sink.update(
-            percent,
-            if encrypted { "解密网易 LevelDB" } else { "规范化 Bedrock" },
-            &format!("{} / {} 个数据库文件", index + 1, total),
-        );
-    }
+    let processed = AtomicUsize::new(0);
+    let decrypted_files = AtomicUsize::new(0);
+    let copied_files = AtomicUsize::new(0);
+    // 多个大 .ldb 文件相互独立，按文件并行解密/复制
+    ordered
+        .par_iter()
+        .try_for_each::<_, Result<()>>(|(name, source)| {
+            sink.check_cancel()?;
+            let lower = name.to_lowercase();
+            if lower == "level.dat" || lower == ".ds_store" || lower == "lock" {
+                let _ = processed.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            let target = output_db.join(name);
+            if starts_with_header(source, &NETEASE_HEADER) {
+                let Some(key_bytes) = key.as_ref() else {
+                    return conv(format!("发现加密文件但未恢复出密钥：{name}"));
+                };
+                decrypt_file(source, &target, key_bytes)?;
+                let _ = decrypted_files.fetch_add(1, Ordering::Relaxed);
+            } else {
+                fs::copy(source, &target)?;
+                let _ = copied_files.fetch_add(1, Ordering::Relaxed);
+            }
+            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            let percent = 13 + (17i64 * done as i64 / total.max(1) as i64) as i32;
+            sink.update(
+                percent,
+                if encrypted {
+                    "解密网易 LevelDB"
+                } else {
+                    "规范化 Bedrock"
+                },
+                &format!("{done} / {total} 个数据库文件"),
+            );
+            Ok(())
+        })?;
+    let decrypted_files = decrypted_files.load(Ordering::Relaxed);
+    let copied_files = copied_files.load(Ordering::Relaxed);
 
     fs::write(output_db.join("CURRENT"), format!("{manifest_name}\n"))?;
     fs::write(output_db.join("LOCK"), b"")?;
@@ -109,7 +128,10 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
             let path = entry.path();
             if path.is_file() && file_name(&path).to_lowercase().ends_with(".ldb") {
                 if !has_plain_footer(&path) {
-                    return conv(format!("解密后的 LevelDB footer 校验失败：{}", file_name(&path)));
+                    return conv(format!(
+                        "解密后的 LevelDB footer 校验失败：{}",
+                        file_name(&path)
+                    ));
                 }
                 validated += 1;
             }
@@ -128,13 +150,13 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
     Ok(())
 }
 
-fn copy_world_metadata(source_root: &Path, source_db: &Path, output: &Path, sink: &Sink) -> Result<()> {
-    fn visit(
-        dir: &Path,
-        source_root: &Path,
-        source_db: &Path,
-        output: &Path,
-    ) -> Result<()> {
+fn copy_world_metadata(
+    source_root: &Path,
+    source_db: &Path,
+    output: &Path,
+    sink: &Sink,
+) -> Result<()> {
+    fn visit(dir: &Path, source_root: &Path, source_db: &Path, output: &Path) -> Result<()> {
         for entry in fs::read_dir(dir)?.filter_map(|entry| entry.ok()) {
             let path = entry.path();
             if path == source_db || path == output || path.starts_with(output) {
@@ -142,11 +164,10 @@ fn copy_world_metadata(source_root: &Path, source_db: &Path, output: &Path, sink
             }
             let relative = path
                 .strip_prefix(source_root)
-                .map_err(|_| crate::error::ConversionError("内部路径错误".into()))?;
-            if relative
-                .iter()
-                .any(|part| ["_conversion", "__MACOSX", ".git"].contains(&part.to_string_lossy().as_ref()))
-            {
+                .map_err(|_| crate::error::ConversionError::from("内部路径错误"))?;
+            if relative.iter().any(|part| {
+                ["_conversion", "__MACOSX", ".git"].contains(&part.to_string_lossy().as_ref())
+            }) {
                 continue;
             }
             let target = output.join(relative);
@@ -203,11 +224,19 @@ fn collect_database_files(root: &Path, db: &Path) -> BTreeMap<String, PathBuf> {
     files
 }
 
+fn manifest_number(name: &str) -> Option<u64> {
+    name.strip_prefix("MANIFEST-")
+        .and_then(|suffix| suffix.parse().ok())
+}
+
 fn choose_manifest_name(files: &BTreeMap<String, PathBuf>) -> Result<String> {
-    let manifests: Vec<&String> = files.keys().filter(|name| name.starts_with("MANIFEST-")).collect();
-    let last = *manifests
-        .last()
-        .ok_or_else(|| crate::error::ConversionError("LevelDB 缺少 MANIFEST-* 文件".into()))?;
+    // MANIFEST-<编号> 按 LevelDB 编号取数值最大；字典序在非零填充编号时会选错
+    // （如 MANIFEST-10 < MANIFEST-2），无法解析编号的回退为字典序末位。
+    let newest = files
+        .keys()
+        .filter(|name| name.starts_with("MANIFEST-"))
+        .max_by_key(|name| manifest_number(name).unwrap_or(0))
+        .ok_or_else(|| crate::error::ConversionError::from("LevelDB 缺少 MANIFEST-* 文件"))?;
     if let Some(current) = files.get("CURRENT") {
         if !starts_with_header(current, &NETEASE_HEADER) {
             if let Ok(value) = fs::read_to_string(current) {
@@ -218,7 +247,7 @@ fn choose_manifest_name(files: &BTreeMap<String, PathBuf>) -> Result<String> {
             }
         }
     }
-    Ok(last.clone())
+    Ok(newest.clone())
 }
 
 struct KeyRecovery {
@@ -227,7 +256,11 @@ struct KeyRecovery {
     valid_footers: usize,
 }
 
-fn recover_key(files: &BTreeMap<String, PathBuf>, manifest_name: &str, log: &AppLog) -> Result<KeyRecovery> {
+fn recover_key(
+    files: &BTreeMap<String, PathBuf>,
+    manifest_name: &str,
+    log: &AppLog,
+) -> Result<KeyRecovery> {
     let mut candidates: Vec<Vec<u8>> = Vec::new();
     if let Some(current) = files.get("CURRENT") {
         if starts_with_header(current, &NETEASE_HEADER) {
@@ -251,7 +284,9 @@ fn recover_key(files: &BTreeMap<String, PathBuf>, manifest_name: &str, log: &App
         }
         encrypted_ldb += 1;
         if let Some(candidate) = recover_eight_byte_key_from_footer(path)? {
-            *ldb_candidates.entry(crate::archive::hex(&candidate)).or_insert(0) += 1;
+            *ldb_candidates
+                .entry(crate::archive::hex(&candidate))
+                .or_insert(0) += 1;
             candidates.push(candidate);
         }
     }
@@ -365,7 +400,10 @@ fn decrypt_file(source: &Path, target: &Path, key: &[u8]) -> Result<()> {
     let mut header = [0u8; 4];
     input.read_exact(&mut header)?;
     if header != NETEASE_HEADER {
-        return conv(format!("加密文件头在读取过程中发生变化：{}", source.display()));
+        return conv(format!(
+            "加密文件头在读取过程中发生变化：{}",
+            source.display()
+        ));
     }
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut position: u64 = 0;
@@ -374,13 +412,55 @@ fn decrypt_file(source: &Path, target: &Path, key: &[u8]) -> Result<()> {
         if read == 0 {
             break;
         }
-        for index in 0..read {
-            buffer[index] ^= key[((position + index as u64) % key.len() as u64) as usize];
-        }
+        xor_slice(&mut buffer[..read], key, position);
         output.write_all(&buffer[..read])?;
         position += read as u64;
     }
     Ok(())
+}
+
+/// 循环 XOR：密钥按全局明文偏移环形取用。
+/// key.len() 为 8 的倍数时按 u64 字块处理（打包后 XOR 与逐字节 XOR 等价），
+/// 大文件上明显快于逐字节取模；其余长度回退逐字节。
+fn xor_slice(buffer: &mut [u8], key: &[u8], position: u64) {
+    if key.is_empty() {
+        return;
+    }
+    let key_len = key.len();
+    if key_len % 8 != 0 {
+        let mut pos = (position % key_len as u64) as usize;
+        for byte in buffer.iter_mut() {
+            *byte ^= key[pos];
+            pos = (pos + 1) % key_len;
+        }
+        return;
+    }
+    let words: Vec<u64> = key
+        .chunks_exact(8)
+        .map(|chunk| u64::from_be_bytes(chunk.try_into().expect("key 长度为 8 的倍数")))
+        .collect();
+    let block_words = words.len();
+    let mut pos = (position % key_len as u64) as usize;
+    let mut index = 0;
+    // 先按字节对齐到密钥周期边界（也即 8 字节边界）
+    while index < buffer.len() && pos % 8 != 0 {
+        buffer[index] ^= key[pos];
+        pos += 1;
+        index += 1;
+    }
+    pos %= key_len;
+    let mut word_index = pos / 8;
+    let aligned = buffer.len() - index;
+    let full = aligned - aligned % 8;
+    for chunk in buffer[index..index + full].chunks_exact_mut(8) {
+        let current = u64::from_be_bytes(chunk.try_into().expect("8 字节"));
+        chunk.copy_from_slice((current ^ words[word_index]).to_be_bytes().as_ref());
+        word_index = (word_index + 1) % block_words;
+    }
+    let tail_start = word_index * 8;
+    for (offset, byte) in buffer[index + full..].iter_mut().enumerate() {
+        *byte ^= key[tail_start + offset];
+    }
 }
 
 fn has_plain_footer(file: &Path) -> bool {
@@ -399,6 +479,7 @@ fn has_plain_footer(file: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::peek_legacy_aes;
     use crate::log::AppLog;
     use crate::models::{WorldInfo, WorldType};
     use std::sync::atomic::AtomicBool;
@@ -418,7 +499,11 @@ mod tests {
         fs::create_dir_all(&db).unwrap();
         fs::write(dir.join("level.dat"), b"bedrock-level").unwrap();
         let manifest_plain = b"MANIFEST-000001\n".to_vec();
-        fs::write(db.join("MANIFEST-000001"), xor_encrypt(&manifest_plain, key)).unwrap();
+        fs::write(
+            db.join("MANIFEST-000001"),
+            xor_encrypt(&manifest_plain, key),
+        )
+        .unwrap();
         fs::write(db.join("CURRENT"), xor_encrypt(b"MANIFEST-000001\n", key)).unwrap();
         // 明文 LDB 长度必须是 8 的倍数，且末尾 8 字节为 footer 魔数
         let mut ldb = vec![0x42u8; 1024];
@@ -460,8 +545,14 @@ mod tests {
         let ldb = fs::read(output.join("db/000001.ldb")).unwrap();
         assert_eq!(ldb.len(), 1024);
         assert_eq!(&ldb[1016..], &LEVELDB_FOOTER);
-        assert_eq!(fs::read_to_string(output.join("db/CURRENT")).unwrap(), "MANIFEST-000001\n");
-        assert_eq!(fs::read(output.join("level.dat")).unwrap(), b"bedrock-level");
+        assert_eq!(
+            fs::read_to_string(output.join("db/CURRENT")).unwrap(),
+            "MANIFEST-000001\n"
+        );
+        assert_eq!(
+            fs::read(output.join("level.dat")).unwrap(),
+            b"bedrock-level"
+        );
     }
 
     #[test]
@@ -473,5 +564,76 @@ mod tests {
         }
         assert_eq!(shortest_period(&raw), key.to_vec());
     }
-}
 
+    #[test]
+    fn xor_slice_matches_naive_for_all_key_lengths() {
+        // 字块快速路径必须与朴素逐字节实现在任意 key 长度 / 起始相位下等价
+        fn naive(buffer: &mut [u8], key: &[u8], position: u64) {
+            for (index, byte) in buffer.iter_mut().enumerate() {
+                *byte ^= key[((position + index as u64) % key.len() as u64) as usize];
+            }
+        }
+        let mut data = vec![0u8; 1000];
+        let mut seed = 0x1234_5678u32;
+        for byte in data.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (seed >> 24) as u8;
+        }
+        let key_lengths = [1usize, 3, 5, 7, 8, 9, 16, 17, 32];
+        let positions = [0u64, 1, 7, 8, 16, 17, 33, 123_456_789];
+        for key_len in key_lengths {
+            let key: Vec<u8> = (0..key_len).map(|i| (i * 7 + 3) as u8).collect();
+            for position in positions {
+                let mut fast = data.clone();
+                xor_slice(&mut fast, &key, position);
+                let mut expected = data.clone();
+                naive(&mut expected, &key, position);
+                assert_eq!(fast, expected, "key_len={key_len} position={position}");
+            }
+        }
+    }
+
+    #[test]
+    fn choose_manifest_prefers_highest_number() {
+        // 非零填充编号下字典序会选错（MANIFEST-10 < MANIFEST-2）
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        for name in ["MANIFEST-2", "MANIFEST-10", "MANIFEST-000003"] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"").unwrap();
+            files.insert(name.to_string(), path);
+        }
+        assert_eq!(choose_manifest_name(&files).unwrap(), "MANIFEST-10");
+    }
+
+    #[test]
+    fn peek_legacy_aes_detects_without_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("world.zip");
+        {
+            use std::io::Write as _;
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            let mut entry = LEGACY_AES_HEADER.to_vec();
+            entry.extend_from_slice(&xor_encrypt(&[0x42u8; 64], &[1, 2, 3, 4, 5, 6, 7, 8])[4..]);
+            zip.start_file("world/db/000001.ldb", options).unwrap();
+            zip.write_all(&entry).unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(peek_legacy_aes(&zip_path));
+
+        // 无 db 条目的普通 zip → 未嗅探到
+        let plain_zip = dir.path().join("plain.zip");
+        {
+            use std::io::Write as _;
+            let file = fs::File::create(&plain_zip).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("hello.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"hi").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(!peek_legacy_aes(&plain_zip));
+    }
+}

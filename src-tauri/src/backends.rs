@@ -1,7 +1,9 @@
 // backends.rs — 对应 Backends.java：定位并调度 Java / Chunker / b2j 外部后端。
 
 use crate::archive::file_name;
-use crate::error::{conv, ConversionError, Result};
+use crate::error::{
+    conv, conv_code, ConversionError, Result, CODE_CANCELLED, CODE_ERROR, CODE_TIMEOUT,
+};
 use crate::models::{BackendStatusDto, TargetVersion};
 use crate::sink::Sink;
 use crate::version::chunker_format;
@@ -14,19 +16,131 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
+/// Chunker 支持的目标范围（与 builtin 回退清单、release.yml 的 Chunker 版本保持同步）：
+/// 新式 26.x（≤ MODERN_MAX_MINOR）；传统 1.12–1.21。
+const MODERN_MAJOR: i32 = 26;
+const MODERN_MAX_MINOR: i32 = 2;
+const LEGACY_MINOR_RANGE: std::ops::RangeInclusive<i32> = 12..=21;
+
+/// 后端无输出的心跳上限：超过即认为挂死，终止并报错（用户仍可随时手动取消）。
+const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 逐行输出回调（拆分复杂类型）。
+type LineHandler<'a> = dyn FnMut(&str) -> Result<()> + 'a;
+
 /// 所有由本模块启动的子进程，shutdown_cleanup / cancel 时统一清理。
-/// 使用 Arc<Mutex<Child>> 使运行中的 run_process 与全局清理共享同一句柄。
-static CHILDREN: Mutex<Vec<Arc<Mutex<Child>>>> = Mutex::new(Vec::new());
+/// 运行结束时通过 UntrackGuard 回收，列表不会无限增长。
+/// Windows 上每个子进程绑定一个 KILL_ON_JOB_CLOSE 的 Job Object（句柄以 usize 存储），
+/// 取消时 TerminateJobObject 终止整棵进程树，再兜底 kill 子进程。
+struct TrackedChild {
+    child: Arc<Mutex<Child>>,
+    #[cfg(windows)]
+    job: Option<usize>,
+}
+
+static CHILDREN: Mutex<Vec<TrackedChild>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+fn create_job_for(child: &Child) -> Option<usize> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0
+            && AssignProcessToJobObject(job, child.as_raw_handle()) != 0;
+        if ok {
+            Some(job as usize)
+        } else {
+            windows_sys::Win32::Foundation::CloseHandle(job);
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminate_job(job: usize) {
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    unsafe {
+        TerminateJobObject(job as *mut core::ffi::c_void, 1);
+    }
+}
+
+#[cfg(windows)]
+fn close_job(job: usize) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    unsafe {
+        CloseHandle(job as *mut core::ffi::c_void);
+    }
+}
 
 fn track(child: Arc<Mutex<Child>>) {
-    CHILDREN.lock().unwrap().push(child);
+    #[cfg(windows)]
+    let job = child.lock().ok().and_then(|guard| create_job_for(&guard));
+    CHILDREN.lock().unwrap().push(TrackedChild {
+        child,
+        #[cfg(windows)]
+        job,
+    });
+}
+
+/// 运行结束（成功、失败或取消）后从跟踪列表移除并释放 Job Object 句柄。
+fn untrack(child: &Arc<Mutex<Child>>) {
+    let removed: Vec<TrackedChild> = {
+        let mut all = CHILDREN.lock().unwrap();
+        let mut kept = Vec::with_capacity(all.len());
+        let mut removed = Vec::new();
+        for tracked in all.drain(..) {
+            if Arc::ptr_eq(&tracked.child, child) {
+                removed.push(tracked);
+            } else {
+                kept.push(tracked);
+            }
+        }
+        *all = kept;
+        removed
+    };
+    for tracked in removed {
+        #[cfg(windows)]
+        if let Some(job) = tracked.job {
+            close_job(job);
+        }
+        #[cfg(not(windows))]
+        drop(tracked);
+    }
+}
+
+/// run_process 的所有提前返回路径都要回收跟踪记录。
+struct UntrackGuard(Arc<Mutex<Child>>);
+
+impl Drop for UntrackGuard {
+    fn drop(&mut self) {
+        untrack(&self.0);
+    }
 }
 
 /// 终止所有仍在运行的子进程（结果无效也不影响取消流程）。
 pub fn kill_all() {
     let children = CHILDREN.lock().unwrap();
-    for child in children.iter() {
-        if let Ok(mut guard) = child.lock() {
+    for tracked in children.iter() {
+        #[cfg(windows)]
+        if let Some(job) = tracked.job {
+            terminate_job(job);
+        }
+        if let Ok(mut guard) = tracked.child.lock() {
             let _ = guard.kill();
         }
     }
@@ -84,25 +198,24 @@ pub fn locate(app: &tauri::AppHandle) -> BackendPaths {
         .flat_map(|bin| ["java.exe", "java"].map(|name| bin.join(name)))
         .find(|candidate| candidate.is_file());
 
-    let chunker = dirs
-        .iter()
-        .find_map(|dir| {
-            let direct = dir.join("chunker-cli.jar");
-            if direct.is_file() {
-                return Some(direct);
-            }
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                return entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()).find(
-                    |path| {
-                        path.is_file()
-                            && path.file_name().is_some_and(|name| {
-                                name.to_string_lossy().to_lowercase() == "chunker-cli.jar"
-                            })
-                    },
-                );
-            }
-            None
-        });
+    let chunker = dirs.iter().find_map(|dir| {
+        let direct = dir.join("chunker-cli.jar");
+        if direct.is_file() {
+            return Some(direct);
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            return entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.is_file()
+                        && path.file_name().is_some_and(|name| {
+                            name.to_string_lossy().to_lowercase() == "chunker-cli.jar"
+                        })
+                });
+        }
+        None
+    });
 
     let b2j = dirs
         .iter()
@@ -157,6 +270,14 @@ pub fn status(app: &tauri::AppHandle) -> BackendStatusDto {
 }
 
 fn java_version(java: &Path) -> Option<String> {
+    java_version_output(java)
+}
+
+fn probe_system_java() -> Option<String> {
+    java_version_output(Path::new("java"))
+}
+
+fn java_version_output(java: &Path) -> Option<String> {
     let output = Command::new(java).arg("-version").output().ok()?;
     if !output.status.success() {
         return None;
@@ -170,22 +291,13 @@ fn java_version(java: &Path) -> Option<String> {
     text.lines().next().map(|line| line.trim().to_string())
 }
 
-fn probe_system_java() -> Option<String> {
-    let output = Command::new("java").arg("-version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let text = if stderr.trim().is_empty() {
-        String::from_utf8_lossy(&output.stdout)
-    } else {
-        stderr
-    };
-    text.lines().next().map(|line| line.trim().to_string())
-}
-
 fn java_available(paths: &BackendPaths) -> bool {
-    paths.java.as_ref().map(|j| java_version(j).is_some()).unwrap_or(false) || probe_system_java().is_some()
+    paths
+        .java
+        .as_ref()
+        .map(|j| java_version(j).is_some())
+        .unwrap_or(false)
+        || probe_system_java().is_some()
 }
 
 /// 可用目标版本列表：优先询问 Chunker，失败回退内置清单。
@@ -204,7 +316,8 @@ pub fn list_target_versions(app: &tauri::AppHandle) -> Vec<TargetVersion> {
 static TARGET_RE: OnceLock<Regex> = OnceLock::new();
 
 fn query_chunker(java: Option<&Path>, chunker: &Path) -> Option<Vec<TargetVersion>> {
-    let re = TARGET_RE.get_or_init(|| Regex::new(r"JAVA_(?:26|1)_\d+(?:_\d+){0,2}").expect("后端版本正则"));
+    let re = TARGET_RE
+        .get_or_init(|| Regex::new(r"JAVA_(?:26|1)_\d+(?:_\d+){0,2}").expect("后端版本正则"));
     let mut command = java_command(java);
     command.arg("-jar").arg(chunker).arg("-f").arg("?");
     if let Some(parent) = chunker.parent() {
@@ -231,7 +344,7 @@ fn query_chunker(java: Option<&Path>, chunker: &Path) -> Option<Vec<TargetVersio
     if targets.is_empty() {
         return None;
     }
-    targets.sort_by(|a, b| b.0.cmp(&a.0));
+    targets.sort_by_key(|target| std::cmp::Reverse(target.0));
     Some(
         targets
             .into_iter()
@@ -243,7 +356,7 @@ fn query_chunker(java: Option<&Path>, chunker: &Path) -> Option<Vec<TargetVersio
     )
 }
 
-/// JAVA_26_2 / JAVA_1_21_10 / JAVA_1_12 → (major, minor, patch)；26.x ≤2，1.12–1.21。
+/// JAVA_26_2 / JAVA_1_21_10 / JAVA_1_12 → (major, minor, patch)；支持范围见模块常量。
 fn parse_target_token(token: &str) -> Option<(i32, i32, i32)> {
     let parts: Vec<&str> = token.split('_').collect();
     if parts.len() < 3 {
@@ -253,8 +366,8 @@ fn parse_target_token(token: &str) -> Option<(i32, i32, i32)> {
     let minor: i32 = parts[2].parse().ok()?;
     let patch: i32 = parts.get(3).and_then(|p| p.parse().ok()).unwrap_or(0);
     match major {
-        26 if minor <= 2 => Some((major, minor, patch)),
-        1 if (12..=21).contains(&minor) => Some((major, minor, patch)),
+        MODERN_MAJOR if minor <= MODERN_MAX_MINOR => Some((major, minor, patch)),
+        1 if LEGACY_MINOR_RANGE.contains(&minor) => Some((major, minor, patch)),
         _ => None,
     }
 }
@@ -294,10 +407,17 @@ fn builtin_targets() -> Vec<TargetVersion> {
     ];
     for (minor, max_patch) in patches {
         for patch in (0..=*max_patch).rev() {
-            list.push(((1, *minor, patch), chunker_format(crate::version::Version { major: 1, minor: *minor, patch })));
+            list.push((
+                (1, *minor, patch),
+                chunker_format(crate::version::Version {
+                    major: 1,
+                    minor: *minor,
+                    patch,
+                }),
+            ));
         }
     }
-    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.sort_by_key(|target| std::cmp::Reverse(target.0));
     list.into_iter()
         .map(|(version, format)| TargetVersion {
             display_name: display_version(version),
@@ -359,8 +479,10 @@ pub fn run_chunker(
     format: &str,
     sink: &Sink,
 ) -> Result<()> {
-    // System::new() 不做任何刷新，total_memory() 恒为 0，必须用 new_all()
-    let system = sysinfo::System::new_all();
+    // 仅刷新内存信息：new_all() 会枚举全部进程与磁盘，纯属浪费
+    let system = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+    );
     let total_gb = system.total_memory() / (1024 * 1024 * 1024);
     let heap_gb = (((total_gb as f64) * 0.7).round() as u64).clamp(2, 12);
     let args = vec![
@@ -376,7 +498,9 @@ pub fn run_chunker(
         format.to_string(),
     ];
     let working_dir = chunker.parent().unwrap_or_else(|| Path::new("."));
-    let program = java.map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("java"));
+    let program = java
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("java"));
     run_process(
         &program,
         &args,
@@ -403,7 +527,8 @@ pub fn run_chunker(
     Ok(())
 }
 
-/// 通用子进程执行：合并 stdout/stderr 逐行写日志；250ms 轮询取消；可取消。
+/// 通用子进程执行：合并 stdout/stderr 逐行写日志；250ms 轮询取消；
+/// 超过 NO_OUTPUT_TIMEOUT 无输出视为挂死并终止。
 #[allow(clippy::too_many_arguments)]
 pub fn run_process(
     program: &Path,
@@ -411,7 +536,7 @@ pub fn run_process(
     working_dir: &Path,
     prepend_path: Option<&Path>,
     sink: &Sink,
-    mut on_line: Option<&mut dyn FnMut(&str) -> Result<()>>,
+    mut on_line: Option<&mut LineHandler<'_>>,
 ) -> Result<()> {
     let mut command = Command::new(program);
     command
@@ -430,13 +555,20 @@ pub fn run_process(
         }
     }
     let child = command.spawn().map_err(|error| {
-        ConversionError(format!(
-            "无法启动 {}：{error}",
-            program.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| program.display().to_string())
-        ))
+        ConversionError::new(
+            CODE_ERROR,
+            format!(
+                "无法启动 {}：{error}",
+                program
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| program.display().to_string())
+            ),
+        )
     })?;
     let child = Arc::new(Mutex::new(child));
     track(child.clone());
+    let _untrack_guard = UntrackGuard(child.clone());
     let (stdout, stderr) = {
         let mut guard = child.lock().unwrap();
         (
@@ -468,9 +600,11 @@ pub fn run_process(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| program.display().to_string());
     let mut last_lines: VecDeque<String> = VecDeque::with_capacity(30);
+    let mut last_output = Instant::now();
     let exit_status: Option<std::process::ExitStatus> = loop {
         match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
+                last_output = Instant::now();
                 last_lines.push_back(line.clone());
                 if last_lines.len() > 30 {
                     last_lines.pop_front();
@@ -487,14 +621,39 @@ pub fn run_process(
                     return Err(error);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // 两个读线程都已退出，等待子进程结束
-                let waited = child.lock().unwrap().wait();
-                match waited {
-                    Ok(status) => break Some(status),
-                    Err(_) => break None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_output.elapsed() > NO_OUTPUT_TIMEOUT {
+                    sink.log
+                        .warn(&format!("{program_name} 已超过心跳上限无输出，终止进程"));
+                    terminate(&child);
+                    return conv_code(
+                        CODE_TIMEOUT,
+                        format!(
+                            "{program_name} 超过 {} 分钟无输出，已终止",
+                            NO_OUTPUT_TIMEOUT.as_secs() / 60
+                        ),
+                    );
                 }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // 两个读线程都已退出，等待子进程结束（同样受心跳上限约束）
+                let status = loop {
+                    match child.lock().unwrap().try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) => {
+                            if last_output.elapsed() > NO_OUTPUT_TIMEOUT {
+                                sink.log.warn(&format!(
+                                    "{program_name} 输出结束后长时间不退出，终止进程"
+                                ));
+                                terminate(&child);
+                                break None;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        Err(_) => break None,
+                    }
+                };
+                break status;
             }
         }
         let waited = child.lock().unwrap().try_wait();
@@ -513,7 +672,7 @@ pub fn run_process(
         }
         if sink.is_cancelled() {
             terminate(&child);
-            return conv("操作已取消");
+            return conv_code(CODE_CANCELLED, "操作已取消");
         }
     };
     let _ = reader_out.join();

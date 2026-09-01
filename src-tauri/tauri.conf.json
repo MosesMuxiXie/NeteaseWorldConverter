@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NeteaseWorldConverter",
-  "version": "1.0.1",
-  "identifier": "com.openai.nwc.tauri",
+  "version": "1.2.0",
+  "identifier": "io.github.mosesmuxixie.nwc",
   "build": {
     "frontendDist": "../src"
   },

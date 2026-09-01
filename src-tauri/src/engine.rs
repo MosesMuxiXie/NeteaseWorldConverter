@@ -2,28 +2,32 @@
 // analyze → targets → convert → validate → zip 的编排核心与会话管理。
 
 use crate::archive::{
-    copy_tree, create_zip, delete_tree, extract_zip, file_name, safe_folder_name, sha256,
-    strip_extension,
+    copy_tree, create_zip, delete_tree, ensure_free_space, extract_zip, file_name, peek_legacy_aes,
+    safe_folder_name, sha256, strip_extension,
 };
 use crate::backends;
 use crate::decrypt;
 use crate::detect;
 use crate::entity;
-use crate::error::{conv, ConversionError, Result};
+use crate::error::{conv, conv_code, ConversionError, Result, CODE_CANCELLED};
 use crate::log::AppLog;
 use crate::models::{
     AnalysisDto, ConversionResultDto, LogPayload, TargetVersion, WorldInfo, WorldType,
 };
 use crate::sink::Sink;
 use crate::validate;
-use crate::version::{chunker_format, is_downgrade_opt, parse_version, Version};
+use crate::version::{chunker_format, is_downgrade_opt, parse_version, JE2BE_INTERMEDIATE};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tempfile::TempDir;
+
+/// 最多同时保留的会话数；超出的最旧非转换中会话会被回收（含其临时目录）。
+const MAX_SESSIONS: usize = 3;
 
 pub struct Session {
     pub session_id: String,
@@ -33,8 +37,19 @@ pub struct Session {
     pub world: WorldInfo,
     pub targets: Vec<TargetVersion>,
     pub cancel: Arc<AtomicBool>,
+    /// 该会话是否正在转换：转换期间禁止并发 convert 与会话回收。
+    converting: AtomicBool,
     pub log: Arc<AppLog>,
     pub result: Mutex<Option<StoredResult>>,
+}
+
+/// convert 返回（无论成功失败）后复位 converting 标记。
+struct ConvertGuard<'a>(&'a AtomicBool);
+
+impl Drop for ConvertGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -64,10 +79,40 @@ fn find_session(session_id: &str) -> Result<Arc<Session>> {
         .unwrap()
         .get(session_id)
         .cloned()
-        .ok_or_else(|| ConversionError(format!("转换会话不存在：{session_id}")))
+        .ok_or_else(|| ConversionError::from(format!("转换会话不存在：{session_id}")))
 }
 
-fn new_sink(app: &AppHandle, session_id: &str, cancel: &Arc<AtomicBool>, log: &Arc<AppLog>) -> Sink {
+/// 会话回收：超出上限时删除最旧且空闲（未在转换）的会话。
+/// session_id 带时间戳前缀，字符串排序即时间排序。
+fn reap_sessions() {
+    let mut all = sessions().lock().unwrap();
+    if all.len() <= MAX_SESSIONS {
+        return;
+    }
+    let mut ids: Vec<String> = all.keys().cloned().collect();
+    ids.sort();
+    for id in ids {
+        if all.len() <= MAX_SESSIONS {
+            break;
+        }
+        let converting = all
+            .get(&id)
+            .is_some_and(|session| session.converting.load(Ordering::SeqCst));
+        if converting {
+            continue;
+        }
+        if let Some(session) = all.remove(&id) {
+            session.log.info("会话已由新的分析回收，临时目录即将释放");
+        }
+    }
+}
+
+fn new_sink(
+    app: &AppHandle,
+    session_id: &str,
+    cancel: &Arc<AtomicBool>,
+    log: &Arc<AppLog>,
+) -> Sink {
     let emit_app = app.clone();
     let emit_session = session_id.to_string();
     log.set_listener(Some(Box::new(move |line: &str| {
@@ -118,10 +163,30 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
     log.info(&format!("SHA-256：{hash}"));
 
     let extracted = temp_path.join("extracted");
-    extract_zip(&input, &extracted, &sink)?;
 
-    sink.update(12, "识别存档", "正在分析目录结构");
-    let world = detect::detect(&extracted, &log)?;
+    // 快速嗅探：旧版 AES-CFB8 无法离线解密，是最常见的失败场景，
+    // 未解压前即可判定时跳过全量解压（大 ZIP 可省数十秒）。
+    let world = if peek_legacy_aes(&input) {
+        log.warn("ZIP 内 db 条目呈 90 1D 30 01 旧版 AES-CFB8 头；跳过全量解压");
+        sink.update(12, "识别存档", "旧版 AES 加密（快速嗅探）");
+        WorldInfo {
+            root: extracted.clone(),
+            database_directory: None,
+            world_type: WorldType::NeteaseBedrockLegacyAes,
+            detected_version: "基岩 LevelDB（旧版 AES-CFB8 加密）".into(),
+            world_name: strip_extension(&name),
+            file_count: 0,
+            byte_count: 0,
+            notes: vec!["在解压前即嗅探到 90 1D 30 01 旧版加密头；该格式无法离线恢复密钥".into()],
+        }
+    } else {
+        let zip_size = fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
+        ensure_free_space(&temp_path, zip_size * 3 + 256 * 1024 * 1024, "解压临时目录")?;
+        extract_zip(&input, &extracted, &sink)?;
+
+        sink.update(12, "识别存档", "正在分析目录结构");
+        detect::detect(&extracted, &log)?
+    };
     sink.update(12, "解析成功", &world.detected_version);
 
     let targets = backends::list_target_versions(app);
@@ -135,7 +200,11 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
 
     let error_report = if !supported && world.world_type == WorldType::NeteaseBedrockLegacyAes {
         log.warn("旧版 AES-CFB8 加密无法离线恢复密钥，导出诊断报告");
-        match export_error_report(log.file(), &input, "检测到旧版 AES-CFB8 加密，需要外部账号密钥") {
+        match export_error_report(
+            log.file(),
+            &input,
+            "检测到旧版 AES-CFB8 加密，需要外部账号密钥",
+        ) {
             Ok(path) => Some(path),
             Err(error) => {
                 log.error("错误报告导出失败", &error);
@@ -154,6 +223,7 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
         world: world.clone(),
         targets: targets.clone(),
         cancel,
+        converting: AtomicBool::new(false),
         log,
         result: Mutex::new(None),
     });
@@ -161,6 +231,7 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
         .lock()
         .unwrap()
         .insert(session_id.clone(), session);
+    reap_sessions();
 
     Ok(AnalysisDto {
         session_id,
@@ -182,8 +253,17 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
 pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<ConversionResultDto> {
     let session = find_session(session_id)?;
     if session.cancel.load(Ordering::Relaxed) {
-        return conv("操作已取消");
+        return conv_code(CODE_CANCELLED, "操作已取消");
     }
+    if session
+        .converting
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return conv("该会话正在转换中，请等待完成或取消");
+    }
+    let _convert_guard = ConvertGuard(&session.converting);
+
     if session.world.world_type == WorldType::NeteaseBedrockLegacyAes {
         return conv("该存档使用旧版 AES-CFB8 加密，密钥不在存档中，无法离线转换");
     }
@@ -196,10 +276,16 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
         .iter()
         .find(|t| t.display_name == target_version)
         .map(|t| t.chunker_format.clone())
-        .or_else(|| {
-            parse_version(&target_version).map(chunker_format)
-        })
-        .ok_or_else(|| ConversionError(format!("未知的目标版本：{target_version}")))?;
+        .or_else(|| parse_version(&target_version).map(chunker_format))
+        .ok_or_else(|| ConversionError::from(format!("未知的目标版本：{target_version}")))?;
+
+    // 工作目录需要容纳解密输出、je2be 输出、chunker 输出与最终 ZIP；
+    // 以源世界字节数的三倍加 1 GiB 做保守预检。
+    ensure_free_space(
+        session.temp_dir.path(),
+        session.world.byte_count * 3 + 1024 * 1024 * 1024,
+        "转换工作目录",
+    )?;
 
     let work = session.temp_dir.path().join("work");
     delete_tree(&work);
@@ -212,7 +298,10 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     let final_world: PathBuf = match session.world.world_type {
         WorldType::Java => {
             let source_version = &session.world.detected_version;
-            let same_version = match (parse_version(source_version), parse_version(&target_version)) {
+            let same_version = match (
+                parse_version(source_version),
+                parse_version(&target_version),
+            ) {
                 (Some(source), Some(target)) => source == target,
                 _ => false,
             };
@@ -223,10 +312,9 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
                 copy_tree(&session.world.root, &chunker_out, &sink, 32, 84)?;
             } else {
                 let paths = backends::locate(app);
-                let chunker = paths
-                    .chunker
-                    .as_ref()
-                    .ok_or_else(|| ConversionError("未找到 chunker-cli.jar，请先运行资源准备脚本".into()))?;
+                let chunker = paths.chunker.as_ref().ok_or_else(|| {
+                    ConversionError::from("未找到 chunker-cli.jar，请先运行资源准备脚本")
+                })?;
                 backends::run_chunker(
                     paths.java.as_deref(),
                     chunker,
@@ -236,11 +324,26 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
                     &sink,
                 )?;
                 if is_downgrade_opt(source_version, &target_version).unwrap_or(false) {
-                    if entity::preserve(&session.world.root, &chunker_out, source_version, &target_version, &sink)? {
-                        notes.push("降级转换：不可映射的实体/POI/玩家已保存到 _NWC_preserved_source".into());
+                    if entity::preserve(
+                        &session.world.root,
+                        &chunker_out,
+                        source_version,
+                        &target_version,
+                        &sink,
+                    )? {
+                        notes.push(
+                            "降级转换：不可映射的实体/POI/玩家已保存到 _NWC_preserved_source"
+                                .into(),
+                        );
                     }
                 } else {
-                    entity::preserve(&session.world.root, &chunker_out, source_version, &target_version, &sink)?;
+                    entity::preserve(
+                        &session.world.root,
+                        &chunker_out,
+                        source_version,
+                        &target_version,
+                        &sink,
+                    )?;
                 }
             }
             chunker_out
@@ -251,16 +354,15 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
             let b2j = paths
                 .b2j
                 .as_ref()
-                .ok_or_else(|| ConversionError("未找到 b2j 后端，请先运行资源准备脚本".into()))?;
+                .ok_or_else(|| ConversionError::from("未找到 b2j 后端，请先运行资源准备脚本"))?;
             backends::run_je2be(b2j, &bedrock_out, &je2be_out, &sink)?;
-            preserve_bedrock_assets(&bedrock_out, &je2be_out, &sink)?;
-            if parse_version(&target_version) == Some(Version { major: 1, minor: 21, patch: 10 }) {
+            preserve_bedrock_assets(&bedrock_out, &je2be_out, &sink, false)?;
+            if parse_version(&target_version) == Some(JE2BE_INTERMEDIATE) {
                 je2be_out
             } else {
-                let chunker = paths
-                    .chunker
-                    .as_ref()
-                    .ok_or_else(|| ConversionError("未找到 chunker-cli.jar，请先运行资源准备脚本".into()))?;
+                let chunker = paths.chunker.as_ref().ok_or_else(|| {
+                    ConversionError::from("未找到 chunker-cli.jar，请先运行资源准备脚本")
+                })?;
                 backends::run_chunker(
                     paths.java.as_deref(),
                     chunker,
@@ -269,13 +371,31 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
                     &chunker_format,
                     &sink,
                 )?;
-                let source_version = "1.21.10";
-                if is_downgrade_opt(source_version, &target_version).unwrap_or(false) {
-                    if entity::preserve(&je2be_out, &chunker_out, source_version, &target_version, &sink)? {
-                        notes.push("降级转换：不可映射的实体/POI/玩家已保存到 _NWC_preserved_source".into());
+                // Chunker 不保证透传 datapacks/resources.zip/icon.png，
+                // 最终输出缺失时从解密输出补齐，避免附件静默丢失。
+                preserve_bedrock_assets(&bedrock_out, &chunker_out, &sink, true)?;
+                let source_version = JE2BE_INTERMEDIATE.to_string();
+                if is_downgrade_opt(&source_version, &target_version).unwrap_or(false) {
+                    if entity::preserve(
+                        &je2be_out,
+                        &chunker_out,
+                        &source_version,
+                        &target_version,
+                        &sink,
+                    )? {
+                        notes.push(
+                            "降级转换：不可映射的实体/POI/玩家已保存到 _NWC_preserved_source"
+                                .into(),
+                        );
                     }
                 } else {
-                    entity::preserve(&je2be_out, &chunker_out, source_version, &target_version, &sink)?;
+                    entity::preserve(
+                        &je2be_out,
+                        &chunker_out,
+                        &source_version,
+                        &target_version,
+                        &sink,
+                    )?;
                 }
                 chunker_out
             }
@@ -293,7 +413,10 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     };
     let report = [
         "Netease World Converter 转换报告".to_string(),
-        format!("时间: {}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z")),
+        format!(
+            "时间: {}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z")
+        ),
         format!("输入 ZIP: {}", session.input_zip.display()),
         format!("识别类型: {}", session.world.world_type.display_name()),
         format!("检测版本: {}", session.world.detected_version),
@@ -349,16 +472,26 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
 }
 
 /// 基岩根目录里对 Java 版仍有意义的附件：datapacks / resources.zip / icon.png。
-fn preserve_bedrock_assets(bedrock: &Path, java_out: &Path, sink: &Sink) -> Result<()> {
+/// `only_if_missing` 为 true 时仅补齐输出中缺失的项（Chunker 已透传的不覆盖）。
+fn preserve_bedrock_assets(
+    bedrock: &Path,
+    java_out: &Path,
+    sink: &Sink,
+    only_if_missing: bool,
+) -> Result<()> {
     for item in ["datapacks", "resources.zip", "icon.png"] {
         let source = bedrock.join(item);
         if !source.exists() {
             continue;
         }
         let destination = java_out.join(item);
+        if only_if_missing && destination.exists() {
+            continue;
+        }
         if source.is_dir() {
             delete_tree(&destination);
             copy_tree(&source, &destination, sink, 64, 65)?;
+            sink.log.info(&format!("保留基岩附件：{item}"));
         } else if source.is_file() {
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)?;
@@ -379,7 +512,7 @@ pub fn save_result(session_id: &str, destination: &str) -> Result<String> {
         .lock()
         .unwrap()
         .clone()
-        .ok_or_else(|| ConversionError("当前没有可保存的转换结果".into()))?;
+        .ok_or_else(|| ConversionError::from("当前没有可保存的转换结果"))?;
     let mut destination = PathBuf::from(destination);
     if destination.extension().is_none() {
         destination.set_extension("zip");
@@ -391,13 +524,18 @@ pub fn save_result(session_id: &str, destination: &str) -> Result<String> {
     Ok(destination.display().to_string())
 }
 
-pub fn export_analysis_error(_app: &AppHandle, path: &str, message: &str) -> Result<Option<String>> {
+pub fn export_analysis_error(
+    _app: &AppHandle,
+    path: &str,
+    message: &str,
+) -> Result<Option<String>> {
     let input = PathBuf::from(path);
     let existing_log = sessions()
         .lock()
         .unwrap()
         .values()
-        .find(|session| session.input_zip == input)
+        .filter(|session| session.input_zip == input)
+        .max_by(|a, b| a.session_id.cmp(&b.session_id))
         .map(|session| session.log.file().to_path_buf());
     match existing_log {
         Some(log_file) => Ok(Some(export_error_report(&log_file, &input, message)?)),
@@ -408,7 +546,7 @@ pub fn export_analysis_error(_app: &AppHandle, path: &str, message: &str) -> Res
             let log_file = temp.path().join("conversion.log");
             let log = AppLog::new(&log_file)?;
             log.info(&format!("输入文件：{input:?}"));
-            log.error("存档解析失败", &ConversionError(message.to_string()));
+            log.error("存档解析失败", &ConversionError::from(message));
             Ok(Some(export_error_report(&log_file, &input, message)?))
         }
     }
@@ -450,26 +588,31 @@ fn export_error_report(log_file: &Path, input: &Path, message: &str) -> Result<S
     }
     conv(format!(
         "错误报告导出失败：{}",
-        last_error.map(|error| error.to_string()).unwrap_or_default()
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_default()
     ))
 }
 
 fn desktop_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
-    Some(home.join("Desktop"))
+    // dirs 走系统 Known Folder API，兼容 OneDrive 重定向桌面；失败回退传统路径
+    dirs::desktop_dir().or_else(|| {
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+        Some(home.join("Desktop"))
+    })
 }
 
 // ---------- 控制 ----------
 
 pub fn is_downgrade(session_id: &str, target: &str) -> Result<bool> {
     let session = find_session(session_id)?;
-    // 与原版一致：基岩存档以 JE2BE 的中间版本 1.21.10 作为源版本参与比较
+    // 与原版一致：基岩存档以 JE2BE 的中间版本作为源版本参与比较
     let source = if session.world.world_type == WorldType::Java {
         session.world.detected_version.clone()
     } else {
-        "1.21.10".to_string()
+        JE2BE_INTERMEDIATE.to_string()
     };
     Ok(is_downgrade_opt(&source, target).unwrap_or(false))
 }
@@ -481,14 +624,74 @@ pub fn cancel(session_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 退出清理：立即返回（不阻塞关窗）。
+/// 临时目录先同卷 rename 成孤儿名（O(1)），删除交给后台线程；
+/// 进程若随即退出导致线程中断，残留孤儿目录由下次启动的 cleanup_stale_temp 兜底。
 pub fn shutdown_cleanup() -> Result<()> {
     backends::kill_all();
     let mut all = sessions().lock().unwrap();
+    let mut orphans: Vec<PathBuf> = Vec::new();
     for session in all.values() {
         session.cancel.store(true, Ordering::Relaxed);
+        let path = session.temp_dir.path();
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let orphan = parent.join(format!(".{name}-orphan-{}", std::process::id()));
+        if fs::rename(path, &orphan).is_ok() {
+            orphans.push(orphan);
+        }
     }
-    all.clear(); // TempDir 析构时自动删除临时目录
+    // clear() 析构 TempDir：已 rename 的目录检测到不存在即跳过，
+    // rename 失败的（极少，如句柄未释放）保持旧的同步删除行为。
+    all.clear();
+    std::thread::spawn(move || {
+        for orphan in orphans {
+            let _ = fs::remove_dir_all(orphan);
+        }
+    });
     Ok(())
+}
+
+/// 启动时清扫历史实例残留的临时目录：
+/// - 孤儿目录（仅由已退出实例的 shutdown 创建）直接删除；
+/// - 普通前缀目录需修改时间超过 2 小时，避免误删并行实例的工作目录。
+pub fn cleanup_stale_temp() {
+    std::thread::spawn(|| {
+        let temp_root = std::env::temp_dir();
+        let Ok(entries) = fs::read_dir(&temp_root) else {
+            return;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            let stale = if name.starts_with(".NeteaseWorldConverter-") && name.contains("-orphan-")
+            {
+                true
+            } else if name.starts_with("NeteaseWorldConverter-") {
+                entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(2 * 3600))
+            } else {
+                continue;
+            };
+            if stale {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    });
 }
 
 // ---------- 文件对话框 / 打开 ----------
@@ -516,7 +719,7 @@ pub fn open_path(path: &str) -> Result<()> {
         std::process::Command::new("explorer")
             .arg(format!("/select,{path}"))
             .spawn()
-            .map_err(|error| ConversionError(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -524,7 +727,7 @@ pub fn open_path(path: &str) -> Result<()> {
             .arg("-R")
             .arg(path)
             .spawn()
-            .map_err(|error| ConversionError(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
     }
     #[cfg(target_os = "linux")]
     {
@@ -535,7 +738,7 @@ pub fn open_path(path: &str) -> Result<()> {
         std::process::Command::new("xdg-open")
             .arg(target)
             .spawn()
-            .map_err(|error| ConversionError(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
     }
     Ok(())
 }

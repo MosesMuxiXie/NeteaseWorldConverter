@@ -30,17 +30,41 @@ const els = {
 };
 
 let session = null;      // { sessionId, type, supported, targets, ... }
-let busy = false;        // 分析或转换进行中
+let busy = false;        // 分析或转换进行中（两者都独占 UI 与后端流水线）
 let converting = false;  // 仅转换进行中
+let cancelRequested = false;
 let errorReportPath = null;
 let modalResolve = null;
+let logBuffer = [];
+const MAX_LOG_LINES = 1500;
 
 // ---------- 日志与进度 ----------
 
 function appendLog(line) {
   if (!line) return;
-  els.log.append(line + "\n");
+  logBuffer.push(line);
+  if (logBuffer.length > MAX_LOG_LINES) {
+    logBuffer.splice(0, logBuffer.length - MAX_LOG_LINES);
+  }
+  els.log.textContent = logBuffer.join("\n") + "\n";
   els.log.scrollTop = els.log.scrollHeight;
+}
+
+// 后端错误统一为 {"code":"...","message":"..."} JSON 字符串；纯文本旧格式兜底
+function parseError(err) {
+  if (typeof err === "string") {
+    try {
+      const parsed = JSON.parse(err);
+      if (parsed && typeof parsed === "object" && typeof parsed.code === "string") {
+        return { code: parsed.code, message: parsed.message ?? err };
+      }
+    } catch (e) { /* 纯文本错误 */ }
+    return { code: "error", message: err };
+  }
+  return {
+    code: (err && err.code) || "error",
+    message: (err && (err.message ?? err.message)) || String(err),
+  };
 }
 
 function setProgress(percent) {
@@ -81,6 +105,8 @@ function resetUiForAnalyze() {
   setBusy(false);
   session = null;
   errorReportPath = null;
+  cancelRequested = false;
+  logBuffer = [];
   els.target.innerHTML = "";
   els.target.disabled = true;
   els.save.disabled = true;
@@ -168,27 +194,28 @@ async function analyze(path) {
 }
 
 async function handleAnalysisFailure(path, err) {
-  const message = typeof err === "string" ? err : (err && err.message) || String(err);
+  const parsed = parseError(err);
   detectionFail("✕ 无法解析存档");
-  setStage(message, "error");
+  setStage(parsed.message, "error");
   setProgress(0);
   els.progressText.textContent = "解析失败";
-  appendLog("ERROR: " + message);
+  appendLog("ERROR: " + parsed.message);
   try {
-    const report = await invoke("export_analysis_error", { path, message });
+    const report = await invoke("export_analysis_error", { path, message: parsed.message });
     if (report) {
       errorReportPath = report;
       els.report.disabled = false;
       appendLog("错误报告：" + report);
     }
   } catch (e) { /* 报告导出失败则忽略 */ }
-  await showModal("解析失败", "存档解析失败。\n" + message + (errorReportPath ? "\n\n错误报告：\n" + errorReportPath : ""), "确定");
+  await showModal("解析失败", "存档解析失败。\n" + parsed.message + (errorReportPath ? "\n\n错误报告：\n" + errorReportPath : ""), "确定");
 }
 
 // ---------- 转换 ----------
 
 els.start.addEventListener("click", async () => {
   if (converting) {
+    cancelRequested = true;
     await invoke("cancel", { sessionId: session.sessionId });
     return;
   }
@@ -210,7 +237,9 @@ els.start.addEventListener("click", async () => {
 
 async function startConversion(target) {
   converting = true;
+  cancelRequested = false;
   errorReportPath = null;
+  setBusy(true); // 转换期间禁用选择/拖放，避免两条流水线的进度与日志交叉污染
   els.save.disabled = true;
   els.report.disabled = true;
   els.target.disabled = true;
@@ -222,6 +251,7 @@ async function startConversion(target) {
   try {
     const result = await invoke("convert", { sessionId: session.sessionId, target });
     converting = false;
+    setBusy(false);
     els.start.textContent = "开始转换";
     els.target.disabled = false;
     setProgress(100);
@@ -234,21 +264,22 @@ async function startConversion(target) {
       `\n\n点击"下载 / 保存 ZIP"选择保存位置。`, "确定");
   } catch (err) {
     converting = false;
+    setBusy(false);
     els.start.textContent = "开始转换";
     els.target.disabled = false;
-    const message = typeof err === "string" ? err : (err && err.message) || String(err);
-    const cancelled = message.includes("已取消") || message.includes("cancel");
+    const parsed = parseError(err);
+    const cancelled = cancelRequested || parsed.code === "cancelled";
     if (cancelled) {
       setStage("转换已取消；原始 ZIP 未修改", "warn");
       els.progressText.textContent = "已取消";
     } else {
-      setStage(message, "error");
+      setStage(parsed.message, "error");
       els.progressText.textContent = "转换失败";
       try {
-        const report = await invoke("export_conversion_error", { sessionId: session.sessionId, message });
+        const report = await invoke("export_conversion_error", { sessionId: session.sessionId, message: parsed.message });
         if (report) { errorReportPath = report; els.report.disabled = false; }
       } catch (e) { /* ignore */ }
-      await showModal("转换失败", "转换失败。原始 ZIP 没有被修改。\n\n" + message +
+      await showModal("转换失败", "转换失败。原始 ZIP 没有被修改。\n\n" + parsed.message +
         (errorReportPath ? "\n\n错误报告：\n" + errorReportPath : ""), "确定");
     }
   }
@@ -265,7 +296,7 @@ els.save.addEventListener("click", async () => {
     setStage("已保存：" + saved, "ok");
     await showModal("保存成功", "已保存：\n" + saved, "确定");
   } catch (err) {
-    await showModal("保存失败", "保存失败：" + (typeof err === "string" ? err : err.message), "确定");
+    await showModal("保存失败", "保存失败：" + parseError(err).message, "确定");
   }
 });
 
@@ -312,6 +343,7 @@ if (getCurrentWindow) {
       event.preventDefault();
       const ok = await showModal("确认退出", "转换仍在进行。确定取消并退出吗？", "退出", "返回");
       if (ok) {
+        cancelRequested = true;
         if (session) { try { await invoke("cancel", { sessionId: session.sessionId }); } catch (e) {} }
         await invoke("shutdown_cleanup");
         getCurrentWindow().destroy();

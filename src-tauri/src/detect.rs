@@ -1,7 +1,7 @@
 // 对应 WorldDetector.java：识别 Java / 基岩 / 网易加密基岩存档。
 
 use crate::archive::{file_name, is_ignored_path};
-use crate::error::{Result};
+use crate::error::Result;
 use crate::log::AppLog;
 use crate::models::{WorldInfo, WorldType};
 use crate::nbt;
@@ -29,7 +29,7 @@ struct Candidate {
 }
 
 /// 与 Java 正则 `db(?:[ _-]*\d+)?` 全串匹配语义一致。
-fn matches_db_directory(name: &str) -> bool {
+pub fn matches_db_directory(name: &str) -> bool {
     if name == "db" {
         return true;
     }
@@ -74,8 +74,7 @@ fn contains_mca(root: &Path, depth: usize) -> bool {
         .into_iter()
         .filter_map(|entry| entry.ok())
         .any(|entry| {
-            entry.file_type().is_file()
-                && file_name(entry.path()).to_lowercase().ends_with(".mca")
+            entry.file_type().is_file() && file_name(entry.path()).to_lowercase().ends_with(".mca")
         })
 }
 
@@ -186,8 +185,8 @@ pub fn detect(extracted: &Path, log: &AppLog) -> Result<WorldInfo> {
             .max_by_key(|candidate| candidate.score)
             .cloned()
             .ok_or_else(|| {
-                crate::error::ConversionError(
-                    "没有找到可识别的 Minecraft 世界根目录。需要 Java level.dat/region，或基岩版 db/*.ldb。".into(),
+                crate::error::ConversionError::from(
+                    "没有找到可识别的 Minecraft 世界根目录。需要 Java level.dat/region，或基岩版 db/*.ldb。",
                 )
             })?,
     };
@@ -213,10 +212,11 @@ pub fn detect(extracted: &Path, log: &AppLog) -> Result<WorldInfo> {
     let (world_type, version, world_name);
     if selected.kind == Kind::Java {
         world_type = WorldType::Java;
-        let metadata = nbt::read_java_level(&selected.root.join("level.dat"))
-            .map_err(|error| {
-                crate::error::ConversionError(format!("找到了 Java 目录，但 level.dat 无法解析；{error}"))
-            })?;
+        let metadata = nbt::read_java_level(&selected.root.join("level.dat")).map_err(|error| {
+            crate::error::ConversionError::from(format!(
+                "找到了 Java 目录，但 level.dat 无法解析；{error}"
+            ))
+        })?;
         version = if metadata.version_name.is_empty() {
             format!("DataVersion {}", metadata.data_version)
         } else {
@@ -279,7 +279,10 @@ pub fn detect(extracted: &Path, log: &AppLog) -> Result<WorldInfo> {
 }
 
 fn depth(root: &Path, child: &Path) -> usize {
-    child.strip_prefix(root).map(|p| p.components().count()).unwrap_or(0)
+    child
+        .strip_prefix(root)
+        .map(|p| p.components().count())
+        .unwrap_or(0)
 }
 
 // 供 decrypt.rs 复用的目录收集工具

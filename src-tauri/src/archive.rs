@@ -1,5 +1,6 @@
 // 对应 ArchiveTools.java：带安全限制的 ZIP 解压/打包、目录复制删除、哈希。
 
+use crate::detect::{matches_db_directory, LEGACY_AES_HEADER, NETEASE_HEADER};
 use crate::error::{conv, ConversionError, Result};
 use crate::sink::Sink;
 use chrono::{DateTime, Datelike, Local, Timelike};
@@ -65,7 +66,11 @@ pub fn safe_folder_name(name: &str) -> String {
             let invalid = matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
                 || (c as u32) < 0x20
                 || c == '\u{7F}';
-            if invalid { '_' } else { c }
+            if invalid {
+                '_'
+            } else {
+                c
+            }
         })
         .collect();
     cleaned = cleaned.trim().to_string();
@@ -91,7 +96,10 @@ fn sanitize_entry_name(name: &str) -> Result<String> {
     while normalized.starts_with("./") {
         normalized = normalized[2..].to_string();
     }
-    let drive_path = normalized.as_bytes().first().is_some_and(|c| c.is_ascii_alphabetic())
+    let drive_path = normalized
+        .as_bytes()
+        .first()
+        .is_some_and(|c| c.is_ascii_alphabetic())
         && normalized.as_bytes().get(1) == Some(&b':');
     if normalized.starts_with('/') || drive_path {
         return conv(format!("ZIP 包含绝对路径：{name}"));
@@ -117,7 +125,7 @@ pub fn extract_zip(zip_path: &Path, destination: &Path, sink: &Sink) -> Result<(
             if entry.size() > 0 {
                 declared_bytes = declared_bytes
                     .checked_add(entry.size())
-                    .ok_or_else(|| ConversionError("ZIP 声明的数据大小溢出".into()))?;
+                    .ok_or_else(|| ConversionError::from("ZIP 声明的数据大小溢出"))?;
             }
         }
         if declared_files > MAX_ENTRIES || declared_bytes > MAX_UNCOMPRESSED_BYTES {
@@ -165,7 +173,10 @@ pub fn extract_zip(zip_path: &Path, destination: &Path, sink: &Sink) -> Result<(
         drop(target);
         extracted_files += 1;
         let percent = if declared_bytes > 0 {
-            2 + (extracted_bytes * 8 / declared_bytes).min(8) as i32
+            2 + (extracted_bytes * 8)
+                .checked_div(declared_bytes)
+                .unwrap_or(0)
+                .min(8) as i32
         } else {
             2 + (((extracted_files as u64) * 8 / declared_files.max(1) as u64).min(8) as i32)
         };
@@ -203,7 +214,7 @@ pub fn create_zip(world: &Path, output_zip: &Path, folder_name: &str, sink: &Sin
         sink.check_cancel()?;
         let relative = file
             .strip_prefix(world)
-            .map_err(|_| ConversionError("内部路径错误".into()))?
+            .map_err(|_| ConversionError::from("内部路径错误"))?
             .to_string_lossy()
             .replace('\\', "/");
         let mut options = SimpleFileOptions::default()
@@ -229,7 +240,7 @@ pub fn create_zip(world: &Path, output_zip: &Path, folder_name: &str, sink: &Sin
         }
         let percent = 94
             + (if total_bytes > 0 {
-                (written * 6 / total_bytes).min(6)
+                (written * 6).checked_div(total_bytes).unwrap_or(0).min(6)
             } else {
                 (((index + 1) as u64) * 6 / files.len().max(1) as u64).min(6)
             }) as i32;
@@ -241,8 +252,10 @@ pub fn create_zip(world: &Path, output_zip: &Path, folder_name: &str, sink: &Sin
     }
     zip.finish()?;
     let size = fs::metadata(output_zip)?.len();
-    sink.log
-        .info(&format!("输出 ZIP：{}（{size} 字节）", output_zip.display()));
+    sink.log.info(&format!(
+        "输出 ZIP：{}（{size} 字节）",
+        output_zip.display()
+    ));
     Ok(())
 }
 
@@ -258,7 +271,13 @@ fn zip_datetime(datetime: &DateTime<Local>) -> Option<zip::DateTime> {
     .ok()
 }
 
-pub fn copy_tree(source: &Path, destination: &Path, sink: &Sink, start: i32, end: i32) -> Result<()> {
+pub fn copy_tree(
+    source: &Path,
+    destination: &Path,
+    sink: &Sink,
+    start: i32,
+    end: i32,
+) -> Result<()> {
     let mut files: Vec<PathBuf> = WalkDir::new(source)
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -270,14 +289,14 @@ pub fn copy_tree(source: &Path, destination: &Path, sink: &Sink, start: i32, end
         sink.check_cancel()?;
         let relative = file
             .strip_prefix(source)
-            .map_err(|_| ConversionError("内部路径错误".into()))?;
+            .map_err(|_| ConversionError::from("内部路径错误"))?;
         let target = destination.join(relative);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(file, &target)?;
-        let percent =
-            start + (((end - start) as i64) * ((index + 1) as i64) / files.len().max(1) as i64) as i32;
+        let percent = start
+            + (((end - start) as i64) * ((index + 1) as i64) / files.len().max(1) as i64) as i32;
         sink.update(
             percent,
             "复制存档",
@@ -285,4 +304,99 @@ pub fn copy_tree(source: &Path, destination: &Path, sink: &Sink, start: i32, end
         );
     }
     Ok(())
+}
+
+/// 解压前嗅探：仅扫描 ZIP central directory，对疑似 LevelDB 数据库条目（db 目录下的
+/// .ldb/.log/MANIFEST-*/CURRENT）读取前 4 字节头部。返回 true 表示嗅探到旧版
+/// AES-CFB8（90 1D 30 01）且未见新版网易头（80 1D 30 01）——此类存档无法离线解密，
+/// 调用方可跳过全量解压直接失败。任何异常按"未嗅探到"处理，走常规全量解压路径；
+/// 该结果仅为快速通道，权威判定仍以解压后的 detect 为准。
+pub fn peek_legacy_aes(zip_path: &Path) -> bool {
+    let Ok(file) = fs::File::open(zip_path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(BufReader::new(file)) else {
+        return false;
+    };
+    let mut saw_legacy = false;
+    let mut saw_modern = false;
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            return false;
+        };
+        if entry.is_dir() || entry.size() < 4 {
+            continue;
+        }
+        let cleaned = entry.name().replace('\\', "/");
+        let parts: Vec<&str> = cleaned.split('/').collect();
+        // 仅认 db/<file> 一层的 LevelDB 数据文件
+        let Some(db_position) = parts.iter().position(|part| matches_db_directory(part)) else {
+            continue;
+        };
+        if parts.len() != db_position + 2 {
+            continue;
+        }
+        let entry_name = parts[db_position + 1].to_uppercase();
+        let is_leveldb_file = entry_name.ends_with(".LDB")
+            || entry_name.ends_with(".LOG")
+            || entry_name.starts_with("MANIFEST-")
+            || entry_name == "CURRENT";
+        if !is_leveldb_file {
+            continue;
+        }
+        let mut header = [0u8; 4];
+        let mut filled = 0;
+        while filled < 4 {
+            match entry.read(&mut header[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(_) => break,
+            }
+        }
+        if filled < 4 {
+            continue;
+        }
+        if header == LEGACY_AES_HEADER {
+            saw_legacy = true;
+        } else if header == NETEASE_HEADER {
+            saw_modern = true;
+        }
+    }
+    saw_legacy && !saw_modern
+}
+
+/// 检查目标路径所在卷的可用空间是否充足；无法确定所在卷时放行（宽松策略）。
+pub fn ensure_free_space(target: &Path, need: u64, purpose: &str) -> Result<()> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut best: Option<(usize, u64)> = None;
+    for disk in &disks {
+        let mount = disk.mount_point();
+        if target.starts_with(mount) {
+            let length = mount.as_os_str().len();
+            if best.is_none() || best.is_some_and(|(best_len, _)| length > best_len) {
+                best = Some((length, disk.available_space()));
+            }
+        }
+    }
+    if let Some((_, available)) = best {
+        if available < need {
+            return conv(format!(
+                "{purpose} 所在磁盘空间不足：需要约 {}，仅剩 {}",
+                format_bytes(need),
+                format_bytes(available)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.2} {}", units[unit])
 }

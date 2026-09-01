@@ -1,6 +1,6 @@
 // make-test-world.mjs — 生成一个最小的合法 Java 1.21 Anvil 世界 ZIP（用于 E2E 测试）。
 // 结构：level.dat（gzip NBT，DataVersion 3955/1.21）+ region/r.0.0.mca（1 个无压缩空 Compound chunk）
-import { gzipSync, deflateSync } from "node:zlib";
+import { gzipSync, deflateRawSync } from "node:zlib";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 const out = process.argv[2] || "e2e-test-world.zip";
@@ -10,10 +10,10 @@ function nbtLevelDat() {
   const nbt = [];
   nbt.push(0x0a, 0x00, 0x00); // root ""
   nbt.push(0x0a, 0x00, 0x04, ...Buffer.from("Data"));
-  nbt.push(0x03, 0x00, 0x0b, ...Buffer.from("DataVersion"), 0x00, 0x00, 0x0f, 0x73); // 3955
+  nbt.push(0x03, 0x00, 0x0b, ...Buffer.from("DataVersion"), 0x00, 0x00, 0x10, 0x5d); // 3955
   nbt.push(0x08, 0x00, 0x09, ...Buffer.from("LevelName"), 0x00, 0x09, ...Buffer.from("E2E测试"));
   nbt.push(0x0a, 0x00, 0x07, ...Buffer.from("Version"));
-  nbt.push(0x08, 0x00, 0x04, ...Buffer.from("Name"), 0x00, 0x05, ...Buffer.from("1.21.0"));
+  nbt.push(0x08, 0x00, 0x04, ...Buffer.from("Name"), 0x00, 0x05, ...Buffer.from("1.21.4"));
   nbt.push(0x00); // end Version
   nbt.push(0x00); // end Data
   nbt.push(0x00); // end root
@@ -60,7 +60,7 @@ function makeZip() {
     local.writeUInt16LE(8, 8);        // deflate
     local.writeUInt16LE(0, 10);       // time
     local.writeUInt16LE(0x21, 12);    // date
-    const compressed = deflateSync(data);
+    const compressed = deflateRawSync(data);
     local.writeUInt32LE(crc32(data), 14);
     local.writeUInt32LE(compressed.length, 18);
     local.writeUInt32LE(data.length, 22);

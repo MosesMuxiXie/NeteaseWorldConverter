@@ -1,7 +1,7 @@
 // 进度/取消抽象：对应 Java 的 ProgressSink + SwingWorker 取消机制。
 // 进度通过回调发出（引擎注入 Tauri 事件发射器，测试注入空操作），不绑定具体运行时。
 
-use crate::error::{conv, Result};
+use crate::error::{conv_code, Result, CODE_CANCELLED};
 use crate::log::AppLog;
 use crate::models::ProgressPayload;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +45,7 @@ impl Sink {
 
     pub fn check_cancel(&self) -> Result<()> {
         if self.is_cancelled() {
-            return conv("操作已取消");
+            return conv_code(CODE_CANCELLED, "操作已取消");
         }
         Ok(())
     }

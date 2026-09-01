@@ -1,25 +1,43 @@
-# NeteaseWorldConverter 1.0.0（Tauri 移植版）发布说明
+# NeteaseWorldConverter 1.2.0 发布说明
 
 ## 平台与形态
 
 | 平台 | 安装包 | 说明 |
 |---|---|---|
-| Windows x64 | NSIS（`*-setup.exe`）/ MSI / 便携 ZIP | 本机构建并完成全部端到端实测 |
-| Windows arm64 | NSIS（`*-arm64-setup.exe`） | 本机构建；b2j 与 jlink runtime 为 x64，经 Windows 11 ARM 模拟层运行，需在 ARM 设备上自测 |
-| macOS x64 / arm64 | `.app` + `.dmg` | 需在对应架构的 macOS 机器或 GitHub Actions（`.github/workflows/release.yml`）上构建；b2j 从 je2be-core 源码本机构建 |
+| Windows x64 | NSIS（`*-setup.exe`）/ MSI / 便携 ZIP | CI 构建 |
+| Windows arm64 | NSIS（`*-arm64-setup.exe`） | 原生 arm64 应用与 Java 运行时；b2j 优先源码构建原生 arm64 版，失败回退 vendored x64（经 Win11 ARM 模拟层运行） |
+| macOS x64 / arm64 | `.dmg` | CI 构建；b2j 从 je2be-core 源码本机构建 |
 
-## 这是什么
+四个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑 `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`（12 项单元测试），全部通过后才开始出安装包。
 
-网易 Minecraft 存档转换器的 Tauri 2 跨平台移植（Rust + WebView）。与原版 Java Swing 程序行为一一对应：
-同一套 ZIP 安全解压、存档识别、网易基岩解密（80 1D 30 01 循环 XOR 密钥恢复）、
-b2j / Chunker 外部后端、Anvil 逐区域验证与 `_NWC_preserved_source` 降级保留策略。
+## 1.2.0 相对 1.0.x 的变化
 
-## 相对原版的变化
+### 数据与资源安全
 
-- **跨平台**：Windows（NSIS / MSI）、macOS（.app / .dmg，b2j 需按 README 从 je2be-core 构建）
-- 界面由 Swing 改为 WebView，交互与状态机一致（拖放、降级确认、取消转换、错误报告导出、逐行日志、0-100 进度）
-- 后端资源随安装包分发：`chunker-cli.jar`、`b2j.exe`（含 LLVM DLL）、jlink Java 26 运行时（Chunker 子进程用）
-- 目标版本列表改为**实时询问 Chunker**（1.21.11 → 1.12、26.2 / 26.1.x），失败时回退内置清单
+- **会话回收**：最多保留 3 个分析会话，超出的最旧空闲会话连同临时目录自动释放；转换中的会话受保护
+- **退出不卡窗**：退出时临时目录先同卷改名（O(1)）再由后台线程删除；应用启动时自动清扫历史实例残留的临时目录
+- **磁盘空间预检**：解压前按 ZIP×3+256MiB、转换前按世界×3+1GiB 检查临时盘可用空间，不足时明确报错
+- **实体保留覆盖全部命名空间**：`dimensions/<任意命名空间>/<任意维度>/entities|poi`（含模组与数据驱动维度）与旧式 `world/DIM-1/DIM1` 布局在降级时都会进入 `_NWC_preserved_source/`，升级时按原相对路径落回
+- **基岩附件不再静默丢失**：基岩→非 1.21.10 目标经 Chunker 转换后，若 datapacks / resources.zip / icon.png 未被透传，自动从解密输出补齐
+- **子进程进程树终止**：Windows 上每个后端子进程绑定 KILL_ON_JOB_CLOSE 的 Job Object，取消时整棵进程树一并终止；运行结束回收跟踪句柄，不再累积
+
+### 性能
+
+- **区域验证并行化**（rayon，按区域文件并行）
+- **LevelDB 解密并行化**（rayon，按文件并行）+ **XOR 密钥按 u64 字块向量化**（与逐字节实现对拍验证等价）
+- **旧版 AES 快速嗅探**：不解压、仅扫 ZIP central directory 读 db 条目头部；最常见的"旧版加密无法离线转换"场景从数十秒降到秒级
+- **sysinfo 最小刷新**（仅刷内存信息）、release profile 改为 `opt-level=3 + lto="thin" + codegen-units=1`
+- 流水线基准（`cargo run --release --example pipeline-bench`）：解压 210–250 MiB/s、打包 150–280 MiB/s、解密 0.6–2.3 GiB/s、验证 0.6–1.5 GiB/s（i7-1365U 实测）
+
+### 健壮性与工程化
+
+- **结构化错误**：IPC 错误统一为 `{"code","message"}`（error / cancelled / timeout），前端按 code 分类，不再字符串匹配
+- **后端心跳超时**：后端超过 10 分钟无输出视为挂死，自动终止并报错
+- **前端状态机修复**：转换期间锁定选择/拖放入口，消除并发分析与进度交叉污染；日志区上限 1500 行
+- **MANIFEST 按 LevelDB 编号数值取最大**（修复非零填充编号下字典序选错，如 MANIFEST-10 < MANIFEST-2）
+- 桌面目录走系统 Known Folder API（兼容 OneDrive 重定向）；日志文件持久句柄；`1.21.10` 中间版本收敛为 `JE2BE_INTERMEDIATE` 常量
+- 应用标识改为 `io.github.mosesmuxixie.nwc`（从旧版本升级会被视为新应用，旧版需手动卸载）
+- 修复 `scripts/make-test-world.mjs` 生成损坏 ZIP 的问题（`deflateSync` → `deflateRawSync`）
 
 ## 已知限制（继承自原版）
 
@@ -29,23 +47,12 @@ b2j / Chunker 外部后端、Anvil 逐区域验证与 `_NWC_preserved_source` �
 
 ## 安装
 
-1. 双击 `NeteaseWorldConverter_1.0.0_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）
-   或使用 MSI 包。
-2. 首次启动若提示缺少后端资源，说明打包资源缺失——请从源码构建：
-   `npm install && npm run prepare:win && npm run build`。
-3. 数据全程本机处理，原始 ZIP 永不修改。
+1. 双击 `NeteaseWorldConverter_1.2.0_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包。
+2. 数据全程本机处理，原始 ZIP 永不修改。
 
 ## 校验
 
 SHA-256 见随发布附带的 `SHA256SUMS.txt`。
-
-## 端到端验证记录（本机实测）
-
-- **后端探测**：随包 jlink Java 26.0.2 + chunker-cli.jar + b2j.exe 全部定位成功；目标版本列表实时询问 Chunker（53 项，26.2 → 1.12）
-- **Java 同版本保真复制**：真实存档 Redstone（1.20.2，8 MB）→ 1.20.2：4 个区域文件、2025 个 chunk 全部通过逐区域结构验证，输出 ZIP 与源逐字节一致
-- **Java 降级转换（Chunker）**：Redstone 1.20.2 → 1.16.5：Chunker 子进程转换成功，level.dat 版本号 1.16.5 / DataVersion 2586，玩家数据与统计正确保留至 `_NWC_preserved_source/`
-- **网易基岩解密**：合成 80 1D 30 01 加密 LevelDB → 密钥恢复与合成密钥完全一致（footer 校验 1/1），3 个加密文件全部解密并通过自检，随后正确调度 b2j
-- **异常路径**：0 字节空区域文件（原版存档常见占位）按空区域跳过；畸形 NBT / 扇区重叠 / 区域越界均被验证器拒绝并导出错误报告
 
 ## 许可证
 

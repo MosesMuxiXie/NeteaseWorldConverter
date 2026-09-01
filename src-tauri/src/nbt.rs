@@ -53,7 +53,7 @@ impl<R: Read> Reader<R> {
         let mut buffer = [0u8; 1];
         self.inner
             .read_exact(&mut buffer)
-            .map_err(|_| ConversionError(self.eof_message().to_string()))?;
+            .map_err(|_| ConversionError::from(self.eof_message()))?;
         Ok(buffer[0])
     }
 
@@ -69,7 +69,7 @@ impl<R: Read> Reader<R> {
         let mut buffer = vec![0u8; count];
         self.inner
             .read_exact(&mut buffer)
-            .map_err(|_| ConversionError(self.eof_message().to_string()))?;
+            .map_err(|_| ConversionError::from(self.eof_message()))?;
         Ok(buffer)
     }
 
@@ -85,7 +85,9 @@ impl<R: Read> Reader<R> {
 
     fn i64_be(&mut self) -> Result<i64> {
         let b = self.bytes(8)?;
-        Ok(i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(i64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     fn string(&mut self) -> Result<String> {
@@ -110,7 +112,7 @@ impl<R: Read> Reader<R> {
             let chunk = length.min(buffer.len() as u64) as usize;
             self.inner
                 .read_exact(&mut buffer[..chunk])
-                .map_err(|_| ConversionError(self.eof_message().to_string()))?;
+                .map_err(|_| ConversionError::from(self.eof_message()))?;
             length -= chunk as u64;
         }
         Ok(())
@@ -131,7 +133,9 @@ impl<R: Read> Reader<R> {
             }
             6 => {
                 let b = self.bytes(8)?;
-                Value::Float(f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+                Value::Float(f64::from_be_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ]))
             }
             7 => {
                 let raw_length = self.i32_be()?;
@@ -158,7 +162,11 @@ impl<R: Read> Reader<R> {
                         list.push(value);
                     }
                 }
-                if self.collect { Value::List(list) } else { Value::Skipped }
+                if self.collect {
+                    Value::List(list)
+                } else {
+                    Value::Skipped
+                }
             }
             10 => {
                 let mut compound = Vec::new();
@@ -176,18 +184,22 @@ impl<R: Read> Reader<R> {
                         compound.push((name, value));
                     }
                 }
-                if self.collect { Value::Compound(compound) } else { Value::Skipped }
+                if self.collect {
+                    Value::Compound(compound)
+                } else {
+                    Value::Skipped
+                }
             }
             11 => {
                 let raw_length = self.i32_be()?;
                 let length = self.checked_length(raw_length, 4)?;
-                self.skip((length as i64 * 4) as u64)?;
+                self.skip((length * 4) as u64)?;
                 Value::Skipped
             }
             12 => {
                 let raw_length = self.i32_be()?;
                 let length = self.checked_length(raw_length, 8)?;
-                self.skip((length as i64 * 8) as u64)?;
+                self.skip((length * 8) as u64)?;
                 Value::Skipped
             }
             other => return conv(format!("非法 NBT 标签类型：{other}")),
@@ -203,7 +215,9 @@ pub fn read_java_level(level_dat: &std::path::Path) -> Result<LevelMetadata> {
     };
     let root_type = reader.u8()?;
     if root_type != 10 {
-        return conv(format!("level.dat 根标签类型为 {root_type}，预期 Compound(10)"));
+        return conv(format!(
+            "level.dat 根标签类型为 {root_type}，预期 Compound(10)"
+        ));
     }
     let _root_name = reader.string()?;
     let root = reader.payload(root_type, 0)?;
@@ -211,7 +225,10 @@ pub fn read_java_level(level_dat: &std::path::Path) -> Result<LevelMetadata> {
         return conv("level.dat 根标签不是 Compound");
     };
     let data = root.get("Data").unwrap_or(&root);
-    let data_version = data.get("DataVersion").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+    let data_version = data
+        .get("DataVersion")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1) as i32;
     let world_name = data
         .get("LevelName")
         .and_then(|v| v.as_str())

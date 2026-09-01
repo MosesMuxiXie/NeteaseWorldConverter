@@ -11,7 +11,7 @@ where
     T: Send + 'static,
     F: FnOnce(&AppHandle) -> crate::error::Result<T> + Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(move || task(&app).map_err(|error| error.0))
+    tauri::async_runtime::spawn_blocking(move || task(&app).map_err(|error| error.to_ipc()))
         .await
         .map_err(|error| format!("后台任务执行失败：{error}"))?
 }
@@ -56,7 +56,7 @@ pub async fn save_result(session_id: String, destination: String) -> Result<Stri
     tauri::async_runtime::spawn_blocking(move || engine::save_result(&session_id, &destination))
         .await
         .map_err(|error| format!("保存任务执行失败：{error}"))?
-        .map_err(|error| error.0)
+        .map_err(|error| error.to_ipc())
 }
 
 #[tauri::command]
@@ -65,7 +65,10 @@ pub async fn export_analysis_error(
     path: String,
     message: String,
 ) -> Result<Option<String>, String> {
-    run_blocking(app, move |app| engine::export_analysis_error(app, &path, &message)).await
+    run_blocking(app, move |app| {
+        engine::export_analysis_error(app, &path, &message)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -73,28 +76,30 @@ pub async fn export_conversion_error(
     session_id: String,
     message: String,
 ) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || engine::export_conversion_error(&session_id, &message))
-        .await
-        .map_err(|error| format!("报告导出失败：{error}"))?
-        .map_err(|error| error.0)
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::export_conversion_error(&session_id, &message)
+    })
+    .await
+    .map_err(|error| format!("报告导出失败：{error}"))?
+    .map_err(|error| error.to_ipc())
 }
 
 #[tauri::command]
 pub fn cancel(session_id: String) -> Result<(), String> {
-    engine::cancel(&session_id).map_err(|error| error.0)
+    engine::cancel(&session_id).map_err(|error| error.to_ipc())
 }
 
 #[tauri::command]
 pub fn is_downgrade(session_id: String, target: String) -> Result<bool, String> {
-    engine::is_downgrade(&session_id, &target).map_err(|error| error.0)
+    engine::is_downgrade(&session_id, &target).map_err(|error| error.to_ipc())
 }
 
 #[tauri::command]
 pub fn open_path(path: String) -> Result<(), String> {
-    engine::open_path(&path).map_err(|error| error.0)
+    engine::open_path(&path).map_err(|error| error.to_ipc())
 }
 
 #[tauri::command]
 pub fn shutdown_cleanup() -> Result<(), String> {
-    engine::shutdown_cleanup().map_err(|error| error.0)
+    engine::shutdown_cleanup().map_err(|error| error.to_ipc())
 }

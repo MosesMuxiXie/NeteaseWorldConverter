@@ -1,6 +1,6 @@
 [package]
 name = "netease-world-converter"
-version = "1.0.1"
+version = "1.2.0"
 description = "网易 Minecraft 存档解密与 Java 版本转换器"
 authors = ["Netease World Converter contributors"]
 license = "GPL-3.0-or-later"
@@ -25,7 +25,16 @@ tempfile = "3"
 regex = "1"
 rfd = "0.15"
 chrono = "0.4"
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+# system：内存探测（Chunker 堆大小）；disk：转换前的磁盘空间预检
+sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
+# 区域验证与 LevelDB 解密的并行化
+rayon = "1"
+# 桌面目录走系统 Known Folder API（兼容 OneDrive 重定向）
+dirs = "5"
+
+[target.'cfg(windows)'.dependencies]
+# 子进程 Job Object（取消时终止整棵进程树）；Win32_Security 为 CreateJobObjectW 的签名依赖
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [lib]
 name = "nwc_lib"
@@ -36,6 +45,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri = { version = "2", default-features = false, features = ["wry", "compression", "dynamic-acl"] }
 
 [profile.release]
-opt-level = 2
-lto = false
+opt-level = 3
+lto = "thin"
+codegen-units = 1
 strip = "symbols"
