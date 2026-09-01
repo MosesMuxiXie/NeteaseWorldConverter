@@ -285,6 +285,35 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     sink.update(85, "验证输出", "检查 Anvil 区域结构");
     let validation = validate::validate(&final_world, &sink)?;
 
+    // 与原版一致：转换统计写入输出世界根目录，随 ZIP 一起交付
+    let region_note = if notes.is_empty() {
+        format!("{} 个区域文件全部通过结构验证", validation.region_files)
+    } else {
+        notes.join("；")
+    };
+    let report = [
+        "Netease World Converter 转换报告".to_string(),
+        format!("时间: {}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z")),
+        format!("输入 ZIP: {}", session.input_zip.display()),
+        format!("识别类型: {}", session.world.world_type.display_name()),
+        format!("检测版本: {}", session.world.detected_version),
+        format!("目标版本: Java {target_version}"),
+        format!("区域文件: {}", validation.region_files),
+        format!("区域记录: {}", validation.region_chunks),
+        format!("输出文件: {}", validation.files),
+        format!("输出字节: {}", validation.bytes),
+        format!("输出 DataVersion: {}", validation.data_version),
+        format!("输出 Version.Name: {}", validation.level_version),
+        format!("实体/POI/玩家处理: {region_note}"),
+        String::new(),
+        "说明：跨版本降级无法表示目标版本尚不存在的内容；原始 ZIP 从未被修改。".to_string(),
+    ];
+    fs::write(
+        final_world.join("NeteaseWorldConverter-report.txt"),
+        report.join("\n") + "\n",
+    )?;
+    sink.log.info("已写入转换报告");
+
     let folder_name = safe_folder_name(&session.world.world_name);
     let base = safe_folder_name(&strip_extension(&file_name(&session.input_zip)));
     let zip_name = format!("{base}-{}.zip", target_version.replace(' ', "_"));
@@ -292,11 +321,6 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     create_zip(&final_world, &result_zip, &folder_name, &sink)?;
     sink.update(100, "完成", "转换成功");
 
-    let region_note = if notes.is_empty() {
-        format!("{} 个区域文件全部通过结构验证", validation.region_files)
-    } else {
-        notes.join("；")
-    };
     sink.log.info(&format!(
         "转换完成：{}（区域文件 {}，chunk {}）",
         result_zip.display(),
@@ -441,11 +465,13 @@ fn desktop_dir() -> Option<PathBuf> {
 
 pub fn is_downgrade(session_id: &str, target: &str) -> Result<bool> {
     let session = find_session(session_id)?;
-    if session.world.world_type == WorldType::Java {
-        Ok(is_downgrade_opt(&session.world.detected_version, target).unwrap_or(false))
+    // 与原版一致：基岩存档以 JE2BE 的中间版本 1.21.10 作为源版本参与比较
+    let source = if session.world.world_type == WorldType::Java {
+        session.world.detected_version.clone()
     } else {
-        Ok(false)
-    }
+        "1.21.10".to_string()
+    };
+    Ok(is_downgrade_opt(&source, target).unwrap_or(false))
 }
 
 pub fn cancel(session_id: &str) -> Result<()> {

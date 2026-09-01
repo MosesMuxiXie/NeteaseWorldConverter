@@ -359,7 +359,8 @@ pub fn run_chunker(
     format: &str,
     sink: &Sink,
 ) -> Result<()> {
-    let system = sysinfo::System::new();
+    // System::new() 不做任何刷新，total_memory() 恒为 0，必须用 new_all()
+    let system = sysinfo::System::new_all();
     let total_gb = system.total_memory() / (1024 * 1024 * 1024);
     let heap_gb = (((total_gb as f64) * 0.7).round() as u64).clamp(2, 12);
     let args = vec![

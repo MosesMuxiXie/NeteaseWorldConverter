@@ -137,7 +137,7 @@ fn copy_world_metadata(source_root: &Path, source_db: &Path, output: &Path, sink
     ) -> Result<()> {
         for entry in fs::read_dir(dir)?.filter_map(|entry| entry.ok()) {
             let path = entry.path();
-            if path == source_db {
+            if path == source_db || path == output || path.starts_with(output) {
                 continue;
             }
             let relative = path
@@ -403,8 +403,6 @@ mod tests {
     use crate::models::{WorldInfo, WorldType};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-    use tauri::test::mock_app;
-    use tauri::Manager;
 
     fn xor_encrypt(plain: &[u8], key: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + plain.len());
@@ -428,27 +426,26 @@ mod tests {
         fs::write(db.join("000001.ldb"), xor_encrypt(&ldb, key)).unwrap();
     }
 
-    fn sink_for<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> (Sink, Arc<AppLog>) {
-        let log_path = app.path().app_log_dir().unwrap().join("test-conversion.log");
-        let log = Arc::new(AppLog::new(&log_path).unwrap());
-        let sink = Sink::new(
+    fn test_sink(dir: &Path) -> Sink {
+        let log = Arc::new(AppLog::new(&dir.join("test-conversion.log")).unwrap());
+        Sink::new(
             "test".into(),
             Arc::new(AtomicBool::new(false)),
-            log.clone(),
+            log,
             |_payload| {},
-        );
-        (sink, log)
+        )
     }
 
     #[test]
     fn decrypts_netease_leveldb_and_normalizes() {
-        let app = mock_app();
         let key = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let dir = tempfile::tempdir().unwrap();
-        build_world(dir.path(), &key);
+        // 输出目录必须与世界根分离——与真实用法（work/bedrock 与 extracted/…）及 Java 原版一致
+        let world_dir = tempfile::tempdir().unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        build_world(world_dir.path(), &key);
         let world = WorldInfo {
-            root: dir.path().to_path_buf(),
-            database_directory: Some(dir.path().join("db")),
+            root: world_dir.path().to_path_buf(),
+            database_directory: Some(world_dir.path().join("db")),
             world_type: WorldType::NeteaseBedrock,
             detected_version: "基岩 LevelDB".into(),
             world_name: "test".into(),
@@ -456,9 +453,8 @@ mod tests {
             byte_count: 0,
             notes: vec![],
         };
-        let handle = app.handle().clone();
-        let (sink, _log) = sink_for(&handle);
-        let output = dir.path().join("out");
+        let sink = test_sink(world_dir.path());
+        let output = output_dir.path().join("bedrock");
         crate::decrypt::prepare(&world, &output, &sink).unwrap();
 
         let ldb = fs::read(output.join("db/000001.ldb")).unwrap();

@@ -261,9 +261,7 @@ mod tests {
     use flate2::Compression;
     use std::io::Write;
     use std::sync::atomic::AtomicBool;
-    use tauri::Manager;
     use std::sync::Arc;
-    use tauri::test::mock_app;
 
     /// 一个合法的空 Compound NBT。
     fn empty_compound() -> Vec<u8> {
@@ -301,36 +299,36 @@ mod tests {
         let nbt = empty_compound();
         let length = (nbt.len() + 1) as u32; // 压缩类型字节 + payload
         let mut header = vec![0u8; 4096];
-        header[0..3].copy_from_slice(&[0x00, 0x00, 0x02]); // offset=2（BE24）
+        header[0..3].copy_from_slice(&[0x00, 0x00, 0x02]); // offset=2（BE24）：扇区 0 位置表、扇区 1 时间戳表
         header[3] = 1; // 1 个扇区
+        let timestamps = vec![0u8; 4096];
         let mut data = vec![0u8; 4096];
         data[0..4].copy_from_slice(&length.to_be_bytes());
         data[4] = 3; // 无压缩
         data[5..5 + nbt.len()].copy_from_slice(&nbt);
         let mut region = Vec::new();
         region.extend_from_slice(&header);
+        region.extend_from_slice(&timestamps);
         region.extend_from_slice(&data);
         fs::write(dir.join("r.0.0.mca"), region).unwrap();
     }
 
-    #[test]
-    fn validates_minimal_anvil_world() {
-        let app = mock_app();
-        let dir = tempfile::tempdir().unwrap();
-        write_level_dat(dir.path());
-        write_test_region(dir.path());
-        let log_path = app
-            .path()
-            .app_log_dir()
-            .unwrap()
-            .join("test-validate.log");
-        let log = Arc::new(AppLog::new(&log_path).unwrap());
-        let sink = crate::sink::Sink::new(
+    fn test_sink(dir: &Path) -> crate::sink::Sink {
+        let log = Arc::new(AppLog::new(&dir.join("test.log")).unwrap());
+        crate::sink::Sink::new(
             "test".into(),
             Arc::new(AtomicBool::new(false)),
             log,
             |_payload| {},
-        );
+        )
+    }
+
+    #[test]
+    fn validates_minimal_anvil_world() {
+        let dir = tempfile::tempdir().unwrap();
+        write_level_dat(dir.path());
+        write_test_region(dir.path());
+        let sink = test_sink(dir.path());
         let result = validate(dir.path(), &sink).unwrap();
         assert_eq!(result.region_files, 1);
         assert_eq!(result.region_chunks, 1);
@@ -350,19 +348,7 @@ mod tests {
         bytes[base..base + 3].copy_from_slice(&[0x00, 0x00, 0x02]);
         bytes[base + 3] = 1;
         fs::write(&path, bytes).unwrap();
-        let app = mock_app();
-        let log_path = app
-            .path()
-            .app_log_dir()
-            .unwrap()
-            .join("test-validate.log");
-        let log = Arc::new(AppLog::new(&log_path).unwrap());
-        let sink = crate::sink::Sink::new(
-            "test".into(),
-            Arc::new(AtomicBool::new(false)),
-            log,
-            |_payload| {},
-        );
+        let sink = test_sink(dir.path());
         assert!(validate(dir.path(), &sink).is_err());
     }
 }
