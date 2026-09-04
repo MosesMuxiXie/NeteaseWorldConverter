@@ -1,6 +1,6 @@
 [package]
 name = "netease-world-converter"
-version = "1.2.0"
+version = "1.2.1"
 description = "网易 Minecraft 存档解密与 Java 版本转换器"
 authors = ["Netease World Converter contributors"]
 license = "GPL-3.0-or-later"
@@ -25,7 +25,7 @@ tempfile = "3"
 regex = "1"
 rfd = "0.15"
 chrono = "0.4"
-# system：内存探测（Chunker 堆大小）；disk：转换前的磁盘空间预检
+# system：Chunker 堆大小与任务资源监控；disk：转换前的磁盘空间预检
 sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
 # 区域验证与 LevelDB 解密的并行化
 rayon = "1"

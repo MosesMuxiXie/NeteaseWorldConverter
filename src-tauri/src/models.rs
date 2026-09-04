@@ -113,6 +113,14 @@ pub struct BackendStatusDto {
 }
 
 #[derive(Clone, serde::Serialize)]
+pub struct ResourceUsageDto {
+    #[serde(rename = "cpuPercent")]
+    pub cpu_percent: f32,
+    #[serde(rename = "memoryBytes")]
+    pub memory_bytes: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
 pub struct ProgressPayload {
     #[serde(rename = "sessionId")]
     pub session_id: String,

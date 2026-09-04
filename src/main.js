@@ -16,6 +16,11 @@ const els = {
   stage: $("stage-label"),
   bar: $("progress-bar"),
   progressText: $("progress-text"),
+  progressTrack: document.querySelector(".progress-track"),
+  resourceMetrics: $("resource-metrics"),
+  metricElapsed: $("metric-elapsed"),
+  metricCpu: $("metric-cpu"),
+  metricMemory: $("metric-memory"),
   log: $("log-area"),
   start: $("start-btn"),
   save: $("save-btn"),
@@ -36,6 +41,8 @@ let cancelRequested = false;
 let errorReportPath = null;
 let modalResolve = null;
 let logBuffer = [];
+let telemetryTimer = null;
+let telemetryStartedAt = 0;
 const MAX_LOG_LINES = 1500;
 
 // ---------- 日志与进度 ----------
@@ -70,6 +77,7 @@ function parseError(err) {
 function setProgress(percent) {
   const p = Math.max(0, Math.min(100, percent));
   els.bar.style.width = p + "%";
+  els.progressTrack.setAttribute("aria-valuenow", p);
   els.progressText.textContent = p + "%";
 }
 
@@ -103,6 +111,7 @@ els.modalCancel.addEventListener("click", () => {
 
 function resetUiForAnalyze() {
   setBusy(false);
+  resetTelemetry();
   session = null;
   errorReportPath = null;
   cancelRequested = false;
@@ -121,9 +130,53 @@ function resetUiForAnalyze() {
 }
 
 function setBusy(isBusy) {
+  const changed = busy !== isBusy;
   busy = isBusy;
   els.choose.disabled = isBusy;
   els.input.disabled = isBusy;
+  if (changed) isBusy ? startTelemetry() : stopTelemetry();
+}
+
+function resetTelemetry() {
+  stopTelemetry();
+  telemetryStartedAt = 0;
+  els.metricElapsed.textContent = "等待任务";
+  els.metricCpu.textContent = "CPU --";
+  els.metricMemory.textContent = "内存 --";
+}
+
+function startTelemetry() {
+  telemetryStartedAt = Date.now();
+  els.resourceMetrics.classList.add("running");
+  els.bar.classList.add("active");
+  refreshTelemetry();
+  telemetryTimer = setInterval(refreshTelemetry, 1000);
+}
+
+function stopTelemetry() {
+  if (telemetryTimer) clearInterval(telemetryTimer);
+  telemetryTimer = null;
+  els.resourceMetrics.classList.remove("running");
+  els.bar.classList.remove("active");
+  if (telemetryStartedAt) {
+    els.metricElapsed.textContent = "用时 " + formatElapsed(Date.now() - telemetryStartedAt);
+  }
+}
+
+async function refreshTelemetry() {
+  const startedAt = telemetryStartedAt;
+  els.metricElapsed.textContent = "已运行 " + formatElapsed(Date.now() - startedAt);
+  try {
+    const usage = await invoke("resource_usage");
+    if (!busy || telemetryStartedAt !== startedAt) return;
+    els.metricCpu.textContent = `CPU ${Math.round(usage.cpuPercent)}%`;
+    els.metricMemory.textContent = "内存 " + formatBytes(usage.memoryBytes);
+  } catch (e) { /* 资源统计失败不影响转换 */ }
+}
+
+function formatElapsed(milliseconds) {
+  const seconds = Math.floor(milliseconds / 1000);
+  return String(Math.floor(seconds / 60)).padStart(2, "0") + ":" + String(seconds % 60).padStart(2, "0");
 }
 
 function applyProgress(p) {

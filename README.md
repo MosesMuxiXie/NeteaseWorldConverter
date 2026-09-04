@@ -72,7 +72,7 @@ npm run build
 
 ## 测试
 
-- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密密钥恢复、Anvil 验证器、版本比较、XOR 字块对拍、多命名空间实体保留、ZIP 嗅探，12 项）。
+- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密密钥恢复、Anvil 验证器、版本比较、XOR 字块对拍、多命名空间实体保留、ZIP 嗅探、资源统计，13 项）。
 - **端到端（推荐）**：用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` 启动应用后：
   - `node scripts/make-test-world.mjs` — 生成最小 Java 1.21 测试世界 ZIP
   - `node scripts/devtools-e2e.mjs 9223 <输入.zip> <输出.zip> <目标版本>` — 走完整 analyze→convert→save 流程

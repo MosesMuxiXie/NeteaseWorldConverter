@@ -45,8 +45,14 @@
 
     <section class="progress-panel">
       <div id="stage-label" class="stage">等待选择 ZIP</div>
-      <div class="progress-track"><div id="progress-bar" class="progress-fill" style="width:0%"></div></div>
+      <div class="progress-track" role="progressbar" aria-label="转换进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar" class="progress-fill" style="width:0%"></div></div>
       <div id="progress-text" class="progress-text">0%</div>
+      <div id="resource-metrics" class="resource-metrics">
+        <span class="activity-dot" aria-hidden="true"></span>
+        <span id="metric-elapsed" class="metric">等待任务</span>
+        <span id="metric-cpu" class="metric">CPU --</span>
+        <span id="metric-memory" class="metric">内存 --</span>
+      </div>
     </section>
 
     <section class="log-panel">

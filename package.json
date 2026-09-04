@@ -1,6 +1,6 @@
 {
   "name": "netease-world-converter-tauri",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "网易 Minecraft 存档转换器（Tauri 跨平台版）",
   "scripts": {

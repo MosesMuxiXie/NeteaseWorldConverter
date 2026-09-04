@@ -1,7 +1,7 @@
-// commands.rs — Tauri IPC 命令层：前端 main.js 的 12 个 invoke 入口。
+// commands.rs — Tauri IPC 命令层：前端 main.js 的 invoke 入口。
 
 use crate::engine;
-use crate::models::{AnalysisDto, BackendStatusDto, ConversionResultDto};
+use crate::models::{AnalysisDto, BackendStatusDto, ConversionResultDto, ResourceUsageDto};
 use std::path::Path;
 use tauri::AppHandle;
 
@@ -35,6 +35,15 @@ pub async fn backend_status(app: AppHandle) -> Result<BackendStatusDto, String> 
     tauri::async_runtime::spawn_blocking(move || crate::backends::status(&app))
         .await
         .map_err(|error| format!("后台任务执行失败：{error}"))
+}
+
+#[tauri::command]
+pub fn resource_usage() -> ResourceUsageDto {
+    let (cpu_percent, memory_bytes) = crate::backends::resource_usage();
+    ResourceUsageDto {
+        cpu_percent: (cpu_percent * 10.0).round() / 10.0,
+        memory_bytes,
+    }
 }
 
 #[tauri::command]

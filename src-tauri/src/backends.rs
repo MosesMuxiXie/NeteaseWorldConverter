@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::Manager;
 
 /// Chunker 支持的目标范围（与 builtin 回退清单、release.yml 的 Chunker 版本保持同步）：
@@ -144,6 +145,47 @@ pub fn kill_all() {
             let _ = guard.kill();
         }
     }
+}
+
+fn aggregate_usage(usage: impl IntoIterator<Item = (f32, u64)>, logical_cpus: usize) -> (f32, u64) {
+    let (cpu, memory) = usage.into_iter().fold((0.0, 0u64), |total, current| {
+        (total.0 + current.0, total.1.saturating_add(current.1))
+    });
+    ((cpu / logical_cpus.max(1) as f32).clamp(0.0, 100.0), memory)
+}
+
+/// 主程序与当前 b2j/Java 后端的合计资源占用。
+pub fn resource_usage() -> (f32, u64) {
+    static SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+    let mut pids = vec![Pid::from_u32(std::process::id())];
+    pids.extend(CHILDREN.lock().unwrap().iter().filter_map(|tracked| {
+        tracked
+            .child
+            .lock()
+            .ok()
+            .map(|child| Pid::from_u32(child.id()))
+    }));
+
+    let mut system = SYSTEM
+        .get_or_init(|| Mutex::new(System::new()))
+        .lock()
+        .unwrap();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
+    );
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    aggregate_usage(
+        pids.iter().filter_map(|pid| {
+            system
+                .process(*pid)
+                .map(|process| (process.cpu_usage(), process.memory()))
+        }),
+        logical_cpus,
+    )
 }
 
 #[derive(Clone)]
@@ -706,5 +748,18 @@ fn terminate(child: &Mutex<Child>) {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aggregate_usage;
+
+    #[test]
+    fn aggregate_usage_normalizes_cpu_and_sums_memory() {
+        let (cpu, memory) = aggregate_usage([(50.0, 100), (150.0, 200)], 4);
+
+        assert_eq!(cpu, 50.0);
+        assert_eq!(memory, 300);
     }
 }

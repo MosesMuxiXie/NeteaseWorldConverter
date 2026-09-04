@@ -32,6 +32,7 @@ pub fn run() {
             commands::pick_input_path,
             commands::shutdown_cleanup,
             commands::backend_status,
+            commands::resource_usage,
         ])
         .run(tauri::generate_context!())
         .expect("NeteaseWorldConverter 启动失败");

@@ -1,14 +1,21 @@
-# NeteaseWorldConverter 1.2.0 发布说明
+# NeteaseWorldConverter 1.2.1 发布说明
 
 ## 平台与形态
 
 | 平台 | 安装包 | 说明 |
 |---|---|---|
-| Windows x64 | NSIS（`*-setup.exe`）/ MSI / 便携 ZIP | CI 构建 |
+| Windows x64 | NSIS（`*-setup.exe`）/ MSI | CI 构建 |
 | Windows arm64 | NSIS（`*-arm64-setup.exe`） | 原生 arm64 应用与 Java 运行时；b2j 优先源码构建原生 arm64 版，失败回退 vendored x64（经 Win11 ARM 模拟层运行） |
 | macOS x64 / arm64 | `.dmg` | CI 构建；b2j 从 je2be-core 源码本机构建 |
 
-四个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑 `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`（12 项单元测试），全部通过后才开始出安装包。
+四个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑 `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`（13 项单元测试），全部通过后才开始出安装包。
+
+## 1.2.1 相对 1.2.0 的变化
+
+- 转换期间实时显示已运行时间、主程序与 b2j/Java 后端的合计 CPU 使用率和内存占用
+- 静默阶段使用流动进度条与活动指示灯，明确区分“仍在运行”和“已经卡死”
+- 进度条补充 ARIA 状态，并遵循系统“减少动态效果”设置
+- 新增 WebView2 资源监控回归脚本与 Rust 资源聚合单元测试
 
 ## 1.2.0 相对 1.0.x 的变化
 
@@ -47,12 +54,12 @@
 
 ## 安装
 
-1. 双击 `NeteaseWorldConverter_1.2.0_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包。
+1. 双击 `NeteaseWorldConverter_1.2.1_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包。
 2. 数据全程本机处理，原始 ZIP 永不修改。
 
 ## 校验
 
-SHA-256 见随发布附带的 `SHA256SUMS.txt`。
+GitHub Release 记录每个附件的 SHA-256 digest，可通过 Assets API 核验。
 
 ## 许可证
 

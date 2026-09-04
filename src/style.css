@@ -113,7 +113,31 @@ select {
   border-radius: 7px;
   transition: width 0.25s ease;
 }
+.progress-fill.active {
+  background: repeating-linear-gradient(120deg, var(--accent) 0 12px, #5a8bef 12px 24px);
+  background-size: 34px 100%;
+  animation: progress-flow 0.8s linear infinite;
+}
 .progress-text { grid-column: 2; align-self: center; font-variant-numeric: tabular-nums; color: var(--muted); }
+.resource-metrics {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.metric { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); }
+.activity-dot { width: 8px; height: 8px; border-radius: 50%; background: #aeb4bf; }
+.resource-metrics.running .activity-dot { background: var(--success); animation: activity-pulse 1.2s ease-in-out infinite; }
+
+@keyframes progress-flow { to { background-position: 34px 0; } }
+@keyframes activity-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill.active, .resource-metrics.running .activity-dot { animation: none; }
+}
 
 .log-panel {
   flex: 1;
