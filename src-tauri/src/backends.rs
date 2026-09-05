@@ -18,13 +18,17 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::Manager;
 
 /// Chunker 支持的目标范围（与 builtin 回退清单、release.yml 的 Chunker 版本保持同步）：
-/// 新式 26.x（≤ MODERN_MAX_MINOR）；传统 1.12–1.21。
+/// 新式 26.x（≤ MODERN_MAX_MINOR，含随包 Chunker 1.19.1 的 26.3）；传统 1.12–1.21。
 const MODERN_MAJOR: i32 = 26;
-const MODERN_MAX_MINOR: i32 = 2;
+const MODERN_MAX_MINOR: i32 = 3;
 const LEGACY_MINOR_RANGE: std::ops::RangeInclusive<i32> = 12..=21;
 
 /// 后端无输出的心跳上限：超过即认为挂死，终止并报错（用户仍可随时手动取消）。
 const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 进程退出后收尾阶段的宽限：正常后端足以把退出前的输出行收完；
+/// 超过仍未见 reader 断开即视为异常（如孙进程持续占住管道），不再无限等待。
+const TAIL_DRAIN_GRACE: Duration = Duration::from_secs(120);
 
 /// 逐行输出回调（拆分复杂类型）。
 type LineHandler<'a> = dyn FnMut(&str) -> Result<()> + 'a;
@@ -398,7 +402,7 @@ fn query_chunker(java: Option<&Path>, chunker: &Path) -> Option<Vec<TargetVersio
     )
 }
 
-/// JAVA_26_2 / JAVA_1_21_10 / JAVA_1_12 → (major, minor, patch)；支持范围见模块常量。
+/// JAVA_26_3 / JAVA_1_21_10 / JAVA_1_12 → (major, minor, patch)；支持范围见模块常量。
 fn parse_target_token(token: &str) -> Option<(i32, i32, i32)> {
     let parts: Vec<&str> = token.split('_').collect();
     if parts.len() < 3 {
@@ -423,10 +427,10 @@ fn display_version(version: (i32, i32, i32)) -> String {
     }
 }
 
-/// 内置回退清单：与 Chunker 1.19.1 实际枚举对齐（26.x ≤2；1.12–1.21），按版本号降序。
+/// 内置回退清单：与 Chunker 1.19.1 实际枚举对齐（26.x ≤3；1.12–1.21），按版本号降序。
 fn builtin_targets() -> Vec<TargetVersion> {
     let mut list: Vec<((i32, i32, i32), String)> = Vec::new();
-    let modern: &[(i32, i32, i32)] = &[(26, 2, 0), (26, 1, 2), (26, 1, 1), (26, 1, 0)];
+    let modern: &[(i32, i32, i32)] = &[(26, 3, 0), (26, 2, 0), (26, 1, 2), (26, 1, 1), (26, 1, 0)];
     for (major, minor, patch) in modern {
         let format = if *patch > 0 {
             format!("JAVA_{major}_{minor}_{patch}")
@@ -569,6 +573,14 @@ pub fn run_chunker(
     Ok(())
 }
 
+/// 追加最近输出行，仅保留最近 30 行（失败时随错误文本一起展示/导出）。
+fn push_last_line(last_lines: &mut VecDeque<String>, line: String) {
+    last_lines.push_back(line);
+    if last_lines.len() > 30 {
+        last_lines.pop_front();
+    }
+}
+
 /// 通用子进程执行：合并 stdout/stderr 逐行写日志；250ms 轮询取消；
 /// 超过 NO_OUTPUT_TIMEOUT 无输出视为挂死并终止。
 #[allow(clippy::too_many_arguments)]
@@ -643,43 +655,83 @@ pub fn run_process(
         .unwrap_or_else(|| program.display().to_string());
     let mut last_lines: VecDeque<String> = VecDeque::with_capacity(30);
     let mut last_output = Instant::now();
-    let exit_status: Option<std::process::ExitStatus> = loop {
+    // exit_status 变为 Some 后并不立即返回：继续收线直到 receiver 断开
+    // （两个 reader 线程均已结束且队列排空），保证进程退出瞬间仍在管道/
+    // 读线程中的最后几行也进入 last_lines，避免错误尾巴竞态丢失。
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut skip_join = false;
+    // 进程已确认退出后的收尾宽限：持续有行到达时 last_output 会不断刷新，
+    // 需要独立的截止时间兜底，避免孙进程占住管道时理论上的无限等待。
+    let mut tail_deadline: Option<Instant> = None;
+    loop {
+        // 收尾宽限到期仍未 Disconnected：跳过 join 并交给下方兜底 drain
+        if let Some(deadline) = tail_deadline {
+            if Instant::now() >= deadline {
+                skip_join = true;
+                break;
+            }
+        }
         match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
                 last_output = Instant::now();
-                last_lines.push_back(line.clone());
-                if last_lines.len() > 30 {
-                    last_lines.pop_front();
-                }
+                push_last_line(&mut last_lines, line.clone());
                 sink.log.info(&line);
                 if let Some(callback) = on_line.as_deref_mut() {
-                    if let Err(error) = callback(&line) {
+                    if exit_status.is_none() {
+                        if let Err(error) = callback(&line) {
+                            terminate(&child);
+                            return Err(error);
+                        }
+                    } else {
+                        // 进程已确认退出后的收尾行：与原实现一致，回调失败不阻断结果
+                        let _ = callback(&line);
+                    }
+                }
+                // 进程已退出后的收尾阶段不再响应取消：真实退出状态不应被晚到的取消掩盖
+                if exit_status.is_none() {
+                    if let Err(error) = sink.check_cancel() {
                         terminate(&child);
                         return Err(error);
                     }
                 }
-                if let Err(error) = sink.check_cancel() {
-                    terminate(&child);
-                    return Err(error);
-                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if last_output.elapsed() > NO_OUTPUT_TIMEOUT {
-                    sink.log
-                        .warn(&format!("{program_name} 已超过心跳上限无输出，终止进程"));
-                    terminate(&child);
-                    return conv_code(
-                        CODE_TIMEOUT,
-                        format!(
-                            "{program_name} 超过 {} 分钟无输出，已终止",
-                            NO_OUTPUT_TIMEOUT.as_secs() / 60
-                        ),
-                    );
+                    match exit_status {
+                        None => {
+                            sink.log
+                                .warn(&format!("{program_name} 已超过心跳上限无输出，终止进程"));
+                            terminate(&child);
+                            return conv_code(
+                                CODE_TIMEOUT,
+                                format!(
+                                    "{program_name} 超过 {} 分钟无输出，已终止",
+                                    NO_OUTPUT_TIMEOUT.as_secs() / 60
+                                ),
+                            );
+                        }
+                        // 进程已退出但 reader 线程迟迟收不到 EOF（罕见，如孙进程仍持有
+                        // 管道句柄）。不再无限等待：跳过 join，receiver 随函数返回而析构，
+                        // 读线程下一次 send 失败即自行结束。
+                        Some(_) => {
+                            skip_join = true;
+                            break;
+                        }
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // 两个读线程都已退出，等待子进程结束（同样受心跳上限约束）
+                // receiver 断开 = 两个 reader 线程都已结束且队列已排空，
+                // 此刻 last_lines 已包含完整的进程输出尾巴。
+                if exit_status.is_some() {
+                    break;
+                }
+                // reader 先结束而子进程尚未退出：等待子进程结束（同样受心跳上限约束）
                 let status = loop {
+                    if sink.is_cancelled() {
+                        terminate(&child);
+                        return conv_code(CODE_CANCELLED, "操作已取消");
+                    }
                     match child.lock().unwrap().try_wait() {
                         Ok(Some(status)) => break Some(status),
                         Ok(None) => {
@@ -688,37 +740,52 @@ pub fn run_process(
                                     "{program_name} 输出结束后长时间不退出，终止进程"
                                 ));
                                 terminate(&child);
-                                break None;
+                                return conv_code(
+                                    CODE_TIMEOUT,
+                                    format!("{program_name} 输出结束后长时间不退出，已终止"),
+                                );
                             }
                             std::thread::sleep(Duration::from_millis(250));
                         }
                         Err(_) => break None,
                     }
                 };
-                break status;
+                exit_status = status;
+                break;
             }
         }
-        let waited = child.lock().unwrap().try_wait();
-        match waited {
-            Ok(Some(status)) => {
-                while let Ok(line) = receiver.try_recv() {
-                    sink.log.info(&line);
-                    if let Some(callback) = on_line.as_deref_mut() {
-                        let _ = callback(&line);
-                    }
+        if exit_status.is_none() {
+            match child.lock().unwrap().try_wait() {
+                Ok(Some(status)) => {
+                    // 只记录退出状态，继续循环收尾行，直到 Disconnected；
+                    // 首次确认退出时启动 120 秒收尾宽限。
+                    exit_status = Some(status);
+                    tail_deadline = Some(Instant::now() + TAIL_DRAIN_GRACE);
                 }
-                break Some(status);
+                Ok(None) => {}
+                Err(_) => break,
             }
-            Ok(None) => {}
-            Err(_) => break None,
         }
-        if sink.is_cancelled() {
+        if exit_status.is_none() && sink.is_cancelled() {
             terminate(&child);
             return conv_code(CODE_CANCELLED, "操作已取消");
         }
-    };
-    let _ = reader_out.join();
-    let _ = reader_err.join();
+    }
+    if !skip_join {
+        // 走 Disconnected 分支时两个 reader 必然已结束，join 立即返回；
+        // 仅“进程句柄出错”等罕见提前 break 会在这里等待，语义与原实现一致。
+        let _ = reader_out.join();
+        let _ = reader_err.join();
+    }
+    // 兜底补收：非 Disconnected 的提前 break（超时/句柄错误）后，队列中已到达
+    // 但尚未处理的行也写入 last_lines（mpsc 每行只被 recv 一次，不会重复入列）。
+    while let Ok(line) = receiver.try_recv() {
+        push_last_line(&mut last_lines, line.clone());
+        sink.log.info(&line);
+        if let Some(callback) = on_line.as_deref_mut() {
+            let _ = callback(&line);
+        }
+    }
 
     match exit_status {
         Some(status) if status.success() => Ok(()),
@@ -753,7 +820,7 @@ fn terminate(child: &Mutex<Child>) {
 
 #[cfg(test)]
 mod tests {
-    use super::aggregate_usage;
+    use super::{aggregate_usage, builtin_targets, parse_target_token};
 
     #[test]
     fn aggregate_usage_normalizes_cpu_and_sums_memory() {
@@ -761,5 +828,21 @@ mod tests {
 
         assert_eq!(cpu, 50.0);
         assert_eq!(memory, 300);
+    }
+
+    #[test]
+    fn accepts_java_26_3_target_token() {
+        assert_eq!(parse_target_token("JAVA_26_3"), Some((26, 3, 0)));
+        // 仍拒绝超出上限的 26.4，确认 MODERN_MAX_MINOR=3 生效
+        assert_eq!(parse_target_token("JAVA_26_4"), None);
+        // 传统下限 1.12 保持可用
+        assert_eq!(parse_target_token("JAVA_1_12"), Some((1, 12, 0)));
+    }
+
+    #[test]
+    fn builtin_fallback_includes_java_26_3() {
+        let targets = builtin_targets();
+        assert!(targets.iter().any(|t| t.chunker_format == "JAVA_26_3"));
+        assert_eq!(targets.first().unwrap().chunker_format, "JAVA_26_3");
     }
 }

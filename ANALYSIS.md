@@ -77,7 +77,7 @@ NeteaseWorldConverter/
 
 ### 6. Backends.java（281 行）— 外部后端调度
 - 定位自身：jar 位置 / user.dir / `jpackage.app-path` 的 exe 目录及其 `app/` 子目录。
-- **listTargetVersions**：跑 `java -jar chunker-cli.jar -f ?`，正则 `JAVA_(?:26|1)_\d+(?:_\d+){0,2}` 抽取并过滤（26.x ≤2；1.12–1.21），按版本号降序；失败回退内置 60+ 版本清单（26.2 → 1.12）。
+- **listTargetVersions**：跑 `java -jar chunker-cli.jar -f ?`，正则 `JAVA_(?:26|1)_\d+(?:_\d+){0,2}` 抽取并过滤（26.x ≤3；1.12–1.21），按版本号降序；失败回退内置 60+ 版本清单（26.3 → 1.12）。
 - **runJe2be**：`b2j -i <bedrock> -o <java> -n <线程>`，线程数 2–16 取 CPU 数；工作目录与 PATH 前置都指向 native/（找 libc++.dll）；进度 31→64 脉冲式（每行 +1，到顶回卷）；完成必须产出 level.dat。
 - **runChunker**：`java -Xms512m -Xmx{内存}G -jar chunker-cli.jar -i <in> -o <out> -f <JAVA_x_y_z>`，内存 = 总内存×70% 夹在 2–12 GiB；进度 64→84 按行内百分比换算；完成必须产出 level.dat。
 - **runProcess 公共**：独立线程逐行读 stdout+stderr 合并流写日志；每 250ms 轮询取消标志，取消时 destroy，3 秒不退则 destroyForcibly。

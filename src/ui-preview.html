@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>网易 Minecraft 存档转换器 · 日和樱色 UI 预览</title>
+<style>
+:root {
+  /* ── 主色（樱玫） ─────────────────────────── */
+  --primary: #C24373;
+  --primary-hover: #AE3560;
+  --primary-grad: linear-gradient(135deg, #C64578, #AE3560);
+  --sakura: #F2A6C4;
+  --sakura-light: #FBE3EE;
+  --sakura-mid: #E8799F;
+  /* ── 辅色（奶油 / 丁香紫） ─────────────────── */
+  --cream: #FFFDF9;
+  --cream-panel: #FFF8F1;
+  --cream-track: #F7E6DF;
+  --lavender: #B49BE3;
+  --lavender-soft: #EFE8FA;
+  /* ── 功能色 ─────────────────────────────── */
+  --success: #3F7355;
+  --success-hover: #3A6E4B;
+  --warning: #95581A;
+  --error: #B03A4A;
+  /* ── 文字 / 描边 ─────────────────────────── */
+  --ink: #4A3A44;
+  --muted: #7D6476;
+  --stage-ink: #5C4A55;
+  --line: #EFD9E2;
+  --line-soft: #F6E7EE;
+  /* ── 日志「记忆里的屏幕」 ─────────────────── */
+  --log-bg: #232848;
+  --log-bg-deep: #1D2238;
+  --log-text: #F9DCE9;
+  --log-err: #FFC9D2;
+  --log-warn: #FFDFAE;
+  --log-ok: #BFE3C9;
+  /* ── 阴影 / 圆角 ─────────────────────────── */
+  --shadow-card: 0 6px 24px rgba(194, 67, 115, 0.10), 0 1px 3px rgba(122, 84, 105, 0.08);
+  --shadow-modal: 0 18px 50px rgba(80, 40, 66, 0.28);
+  --shadow-window: 0 24px 60px rgba(150, 90, 120, 0.18), 0 4px 14px rgba(150, 90, 120, 0.10);
+  --radius-card: 18px;
+  --radius-field: 12px;
+  --radius-pill: 999px;
+  /* ── 字体（本地字体族，无外部字体） ─────────── */
+  --font-title: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STZhongsong", "SimSun", serif;
+  --font-body: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink);
+  background:
+    radial-gradient(900px 420px at 88% -8%, rgba(242, 166, 196, 0.30), transparent 62%),
+    radial-gradient(800px 460px at -6% 100%, rgba(180, 155, 227, 0.22), transparent 60%),
+    linear-gradient(160deg, #FFF6EC 0%, #FDEDF3 55%, #F3E9FA 100%);
+  user-select: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 24px 26px;
+}
+
+/* ═══ 演示控制栏（仅预览页所有，真实 UI 无此元素） ═══ */
+.demo-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  padding: 2px 4px 14px;
+}
+.demo-label { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); }
+.demo-note { font-size: 11.5px; color: var(--muted); opacity: 0.8; }
+button.demo-btn {
+  padding: 5px 14px;
+  border: 1px solid #F3DCE6;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.75);
+  color: #8C5B70;
+  font-size: 12.5px;
+}
+button.demo-btn:hover { background: #fff; border-color: var(--sakura); }
+button.demo-btn.active {
+  background: var(--primary-grad);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(194, 67, 115, 0.30);
+}
+
+/* ═══ 应用窗口（预览用外框；真实 UI 由系统窗框代替） ═══ */
+.app-window {
+  position: relative;
+  width: min(1000px, 100%);
+  height: min(800px, calc(100vh - 118px));
+  min-height: 520px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  background: linear-gradient(180deg, #FFFDFB 0%, #FFFAF7 100%);
+  box-shadow: var(--shadow-window);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ═══ 装饰层（内联 SVG，z-index 0，不遮挡内容） ═══ */
+.backdrop { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+.deco-cloud { position: absolute; opacity: 0.55; }
+.deco-cloud.c1 { top: -14px; right: -36px; width: 250px; }
+.deco-cloud.c2 { bottom: -34px; left: -48px; width: 300px; opacity: 0.45; }
+.sparkle { position: absolute; opacity: 0.75; }
+.sparkle.s1 { top: 68px; right: 108px; width: 22px; }
+.sparkle.s2 { bottom: 84px; right: 46px; width: 14px; opacity: 0.6; }
+.petal {
+  position: absolute;
+  top: -26px;
+  width: 18px;
+  height: 18px;
+  opacity: 0.5;
+  animation: petal-fall 19s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.petal.p1 { left: 11%; animation-duration: 21s; }
+.petal.p2 { left: 27%; width: 14px; height: 14px; animation-duration: 17s; animation-delay: 3.5s; opacity: 0.42; }
+.petal.p3 { left: 46%; width: 16px; height: 16px; animation-duration: 23s; animation-delay: 6s; opacity: 0.46; }
+.petal.p4 { left: 63%; width: 13px; height: 13px; animation-duration: 18s; animation-delay: 2s; opacity: 0.4; }
+.petal.p5 { left: 78%; width: 19px; height: 19px; animation-duration: 24s; animation-delay: 8.5s; opacity: 0.48; }
+.petal.p6 { left: 90%; width: 15px; height: 15px; animation-duration: 20s; animation-delay: 5s; opacity: 0.44; }
+@keyframes petal-fall {
+  0%   { transform: translate3d(0, -20px, 0) rotate(0deg); }
+  25%  { transform: translate3d(26px, 200px, 0) rotate(90deg); }
+  50%  { transform: translate3d(-14px, 420px, 0) rotate(160deg); }
+  75%  { transform: translate3d(22px, 640px, 0) rotate(250deg); }
+  100% { transform: translate3d(-10px, 860px, 0) rotate(330deg); }
+}
+
+/* ═══ 真实 UI 复刻（选择器与 src/index.html 完全一致） ═══ */
+.root {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 26px 18px;
+  gap: 14px;
+}
+
+.header h1 {
+  margin: 0;
+  font-family: var(--font-title);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.sakura-mark { width: 20px; height: 20px; flex: none; }
+.subtitle { margin: 5px 0 0; font-size: 12.5px; letter-spacing: 0.02em; color: var(--muted); }
+
+.card {
+  background: var(--cream-panel);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  padding: 14px 18px;
+  box-shadow: var(--shadow-card), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+.config { display: flex; flex-direction: column; gap: 10px; }
+.row { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.row > label { width: 76px; flex: none; font-weight: 600; font-size: 13px; color: var(--ink); }
+
+#input-field {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-field);
+  background: #FFFDFB;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button {
+  padding: 8px 18px;
+  border: none;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #F6E4EC;
+  color: #6E4154;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+button:hover:not(:disabled) { background: #EFD3DF; }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--primary-grad); color: #fff; box-shadow: 0 4px 14px rgba(194, 67, 115, 0.32); }
+button.primary:hover:not(:disabled) { background: linear-gradient(135deg, #B93A6A, #9E2F55); box-shadow: 0 6px 18px rgba(194, 67, 115, 0.38); }
+button.success { background: var(--success); color: #fff; box-shadow: 0 4px 14px rgba(71, 128, 89, 0.30); }
+button.success:hover:not(:disabled) { background: #3A6E4B; }
+button.plain { background: #F6E4EC; color: #6E4154; }
+
+.detection { font-weight: 600; }
+.detection.idle { color: var(--muted); font-weight: 400; }
+.detection.ok { color: var(--success); }
+.detection.error { color: var(--error); }
+.details { color: var(--muted); font-size: 12.5px; }
+
+select {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-field);
+  background: #FFFDFB;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+.warning { color: var(--warning); font-size: 12.5px; line-height: 1.5; }
+.warning.severe { color: var(--error); font-weight: 600; }
+
+.progress-panel { display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; }
+.stage {
+  grid-column: 1 / -1;
+  color: var(--stage-ink);
+  font-size: 13px;
+  min-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage.ok { color: var(--success); }
+.stage.error { color: var(--error); }
+.stage.warn { color: var(--warning); }
+.progress-track {
+  grid-column: 1;
+  height: 14px;
+  background: var(--cream-track);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(122, 84, 105, 0.07);
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #F7B3CE 0%, #E8739F 60%, #C64578 100%);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 1px 4px rgba(214, 92, 140, 0.35);
+  transition: width 0.25s ease;
+}
+.progress-fill.active {
+  background-image:
+    repeating-linear-gradient(120deg, rgba(255, 255, 255, 0.28) 0 10px, transparent 10px 20px),
+    linear-gradient(90deg, #F7B3CE 0%, #E8739F 60%, #C64578 100%);
+  background-size: 34px 100%, auto;
+  animation: progress-flow 0.9s linear infinite;
+}
+.progress-text { grid-column: 2; align-self: center; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.resource-metrics {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.metric { padding: 3px 10px; border: 1px solid var(--line-soft); border-radius: var(--radius-pill); background: #FFFDFB; }
+.activity-dot { width: 8px; height: 8px; border-radius: 50%; background: #C9A7B8; }
+.resource-metrics.running .activity-dot { background: var(--success); animation: activity-pulse 1.2s ease-in-out infinite; }
+@keyframes progress-flow { to { background-position: 34px 0, 0 0; } }
+@keyframes activity-pulse { 50% { opacity: 0.35; transform: scale(0.75); } }
+
+.log-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.log-title {
+  padding: 8px 14px;
+  background: var(--cream-panel);
+  border-bottom: 1px solid var(--line-soft);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink);
+}
+#log-area {
+  flex: 1;
+  margin: 0;
+  padding: 10px 14px;
+  overflow: auto;
+  background: linear-gradient(180deg, var(--log-bg) 0%, var(--log-bg-deep) 100%);
+  color: var(--log-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+#log-area .ts { color: var(--log-dim, #A9A0C8); }
+#log-area .err { color: var(--log-err); font-weight: 600; }
+#log-area .warn { color: var(--log-warn); }
+#log-area .ok { color: var(--log-ok); }
+
+.actions { display: flex; align-items: center; gap: 10px; }
+.spacer { flex: 1; }
+.privacy {
+  color: var(--muted);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: help;
+}
+.privacy .mini-flower { width: 13px; height: 13px; opacity: 0.9; }
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(242, 166, 196, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+  pointer-events: none;
+}
+.drop-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 36px 56px;
+  border: 2px dashed var(--sakura-mid);
+  border-radius: 18px;
+  background: rgba(255, 253, 249, 0.94);
+  color: var(--primary);
+  font-family: var(--font-title);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  box-shadow: 0 10px 30px rgba(194, 67, 115, 0.16);
+}
+.drop-box svg { width: 26px; height: 26px; }
+.hidden { display: none !important; }
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(74, 46, 66, 0.38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.modal {
+  width: 460px;
+  max-width: calc(100% - 60px);
+  background: #FFFDF9;
+  border: 1px solid var(--line-soft);
+  border-radius: 18px;
+  padding: 20px 22px;
+  box-shadow: var(--shadow-modal), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+.modal-title {
+  font-family: var(--font-title);
+  font-size: 16.5px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+.modal-body {
+  color: var(--ink);
+  font-size: 13.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 46vh;
+  overflow: auto;
+  user-select: text;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+button:focus-visible, select:focus-visible, #input-field:focus-visible {
+  outline: 2px solid rgba(198, 69, 120, 0.55);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .petal { display: none; }
+  .progress-fill.active, .resource-metrics.running .activity-dot { animation: none; }
+}
+
+@media (max-width: 780px) {
+  .demo-note { display: none; }
+  .row > label { width: 64px; }
+  .root { padding: 16px 18px 14px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ 演示控制（仅预览页；真实 UI 中无此栏） ═══ -->
+<div class="demo-bar">
+  <span class="demo-label">演示控制 · 仅预览页</span>
+  <button class="demo-btn active" data-state="idle">空闲态</button>
+  <button class="demo-btn" data-state="success">识别成功</button>
+  <button class="demo-btn" data-state="converting">转换中</button>
+  <button class="demo-btn" data-state="failure">失败弹窗</button>
+  <button class="demo-btn" data-state="downgrade">降级警告</button>
+  <button class="demo-btn" data-state="drop">拖放遮罩</button>
+  <span class="demo-note">除本栏外，下方即真实 UI 的 1:1 复刻（选择器与 id 全部沿用）。</span>
+</div>
+
+<div class="app-window">
+  <!-- 装饰层：云朵 / 樱花瓣 / 星光（内联 SVG，克制的 6 瓣 + 2 云 + 2 星） -->
+  <div class="backdrop" aria-hidden="true">
+    <svg class="deco-cloud c1" viewBox="0 0 160 80" xmlns="http://www.w3.org/2000/svg"><path d="M24 64 Q6 64 8 46 Q10 30 26 32 Q30 16 50 18 Q64 8 82 18 Q102 10 114 26 Q134 24 136 42 Q150 46 148 58 Q144 68 128 66 Z" fill="#FFFFFF"/></svg>
+    <svg class="deco-cloud c2" viewBox="0 0 160 80" xmlns="http://www.w3.org/2000/svg"><path d="M24 64 Q6 64 8 46 Q10 30 26 32 Q30 16 50 18 Q64 8 82 18 Q102 10 114 26 Q134 24 136 42 Q150 46 148 58 Q144 68 128 66 Z" fill="#FFFFFF"/></svg>
+    <svg class="sparkle s1" viewBox="0 0 20 18" xmlns="http://www.w3.org/2000/svg"><path d="M10 1 C10.8 6.2 12.8 8.2 18 9 C12.8 9.8 10.8 11.8 10 17 C9.2 11.8 7.2 9.8 2 9 C7.2 8.2 9.2 6.2 10 1 Z" fill="#C8B6F0"/></svg>
+    <svg class="sparkle s2" viewBox="0 0 20 18" xmlns="http://www.w3.org/2000/svg"><path d="M10 1 C10.8 6.2 12.8 8.2 18 9 C12.8 9.8 10.8 11.8 10 17 C9.2 11.8 7.2 9.8 2 9 C7.2 8.2 9.2 6.2 10 1 Z" fill="#F2A6C4"/></svg>
+    <svg class="petal p1" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F2A6C4"/></svg>
+    <svg class="petal p2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F8C6DA"/></svg>
+    <svg class="petal p3" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F2A6C4"/></svg>
+    <svg class="petal p4" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F8C6DA"/></svg>
+    <svg class="petal p5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F2A6C4"/></svg>
+    <svg class="petal p6" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 1 C16.5 5 18.5 9.5 12 16.5 C5.5 9.5 7.5 5 12 1 Z" fill="#F8C6DA"/></svg>
+  </div>
+
+  <!-- ↓↓↓ 以下结构与 src/index.html 完全一致（id 全部沿用） ↓↓↓ -->
+  <div id="drop-overlay" class="drop-overlay hidden">
+    <div class="drop-box">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><g fill="#E8799F"><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(72 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(144 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(216 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="1.8" fill="#FFFDF9"/></svg>
+      松开以选择存档 ZIP
+    </div>
+  </div>
+
+  <main class="root">
+    <header class="header">
+      <h1>
+        <svg class="sakura-mark" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><g fill="#E8799F"><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(72 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(144 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(216 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(288 12 12)"/></g><circle cx="12" cy="12" r="1.8" fill="#FBE3EE"/></svg>
+        网易 Minecraft 存档转换器
+      </h1>
+      <p class="subtitle">ZIP 全程仅在本机处理 · 自动识别网易基岩 / Java · 输出 Java 26.3—1.12</p>
+    </header>
+
+    <section class="card config">
+      <div class="row">
+        <label for="input-field">存档 ZIP</label>
+        <input id="input-field" type="text" readonly placeholder="尚未选择存档" />
+        <button id="choose-btn" class="primary">选择 / 上传 ZIP</button>
+      </div>
+      <div class="row">
+        <label>识别结果</label>
+        <span id="detection-label" class="detection idle">尚未选择存档</span>
+      </div>
+      <div class="row">
+        <label></label>
+        <span id="details-label" class="details"></span>
+      </div>
+      <div class="row">
+        <label for="target-box">目标 Java</label>
+        <select id="target-box" disabled></select>
+      </div>
+      <div class="row">
+        <label></label>
+        <span id="warning-label" class="warning">
+          降级到旧版本时，目标版本不存在的新方块、物品和实体无法无损表达。
+        </span>
+      </div>
+    </section>
+
+    <section class="progress-panel">
+      <div id="stage-label" class="stage">等待选择 ZIP</div>
+      <div class="progress-track" role="progressbar" aria-label="转换进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar" class="progress-fill" style="width:0%"></div></div>
+      <div id="progress-text" class="progress-text">0%</div>
+      <div id="resource-metrics" class="resource-metrics">
+        <span class="activity-dot" aria-hidden="true"></span>
+        <span id="metric-elapsed" class="metric">等待任务</span>
+        <span id="metric-cpu" class="metric">CPU --</span>
+        <span id="metric-memory" class="metric">内存 --</span>
+      </div>
+    </section>
+
+    <section class="log-panel">
+      <div class="log-title">详细进度 / 日志</div>
+      <pre id="log-area"></pre>
+    </section>
+
+    <footer class="actions">
+      <button id="start-btn" class="primary" disabled>开始转换</button>
+      <button id="save-btn" class="success" disabled>下载 / 保存 ZIP</button>
+      <button id="report-btn" disabled>打开错误报告</button>
+      <span class="spacer"></span>
+      <span class="privacy" id="backend-note">
+        <svg class="mini-flower" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><g fill="#B49BE3"><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(72 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(144 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(216 12 12)"/><path d="M12 2.6 C14 6 14 9.4 12 12 C10 9.4 10 6 12 2.6 Z" transform="rotate(288 12 12)"/></g></svg>
+        原始 ZIP 永不修改
+      </span>
+    </footer>
+  </main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <div id="modal-title" class="modal-title"></div>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="plain">取消</button>
+        <button id="modal-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* 预览页状态模拟器：完全复用真实元素 id，演示各状态下的渲染效果。
+   （真实行为见 src/main.js —— 本脚本仅按相同赋值方式填充模拟数据。） */
+
+var $ = function (id) { return document.getElementById(id); };
+var els = {
+  input: $("input-field"),
+  choose: $("choose-btn"),
+  detection: $("detection-label"),
+  details: $("details-label"),
+  target: $("target-box"),
+  warning: $("warning-label"),
+  stage: $("stage-label"),
+  bar: $("progress-bar"),
+  progressText: $("progress-text"),
+  progressTrack: document.querySelector(".progress-track"),
+  resourceMetrics: $("resource-metrics"),
+  metricElapsed: $("metric-elapsed"),
+  metricCpu: $("metric-cpu"),
+  metricMemory: $("metric-memory"),
+  log: $("log-area"),
+  start: $("start-btn"),
+  save: $("save-btn"),
+  report: $("report-btn"),
+  backendNote: $("backend-note"),
+  dropOverlay: $("drop-overlay"),
+  backdrop: $("modal-backdrop"),
+  modalTitle: $("modal-title"),
+  modalBody: $("modal-body"),
+  modalOk: $("modal-ok"),
+  modalCancel: $("modal-cancel"),
+};
+
+var TARGETS = ["1.21.4", "1.20.4", "1.19.4", "1.18.2", "1.17.1", "1.16.5", "1.15.2", "1.14.4", "1.13.2", "1.12.2"];
+var telemetryTimer = null;
+var telemetryStartedAt = 0;
+var cpuValue = 58;
+var memoryValue = 1.28;
+
+/* ---------- 基础助手（与 main.js 同款赋值方式） ---------- */
+
+function esc(t) {
+  return String(t).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function renderLog(lines) {
+  els.log.innerHTML = lines.map(function (l) {
+    var cls = l.cls || "";
+    return '<span class="' + cls + '">' + esc(l.t) + "</span>";
+  }).join("\n") + "\n";
+  els.log.scrollTop = els.log.scrollHeight; // 模拟真实滚动到最新
+}
+
+function setProgress(percent) {
+  var p = Math.max(0, Math.min(100, percent));
+  els.bar.style.width = p + "%";
+  els.progressTrack.setAttribute("aria-valuenow", p);
+  els.progressText.textContent = p + "%";
+}
+
+function setStage(text, cls) {
+  els.stage.textContent = text;
+  els.stage.className = "stage" + (cls ? " " + cls : "");
+}
+
+function setDetection(text, cls) {
+  els.detection.textContent = text;
+  els.detection.className = "detection" + (cls ? " " + cls : "");
+}
+
+function refreshDowngradeWarning() {
+  var v = els.target.value || "";
+  if (/^1\.1[2-6](\D|$)/.test(v)) {
+    els.warning.textContent = "⚠ 大跨度降级：新版本内容无法在 " + v + " 中表示；请务必保留原 ZIP。";
+    els.warning.className = "warning severe";
+  } else if (v) {
+    els.warning.textContent = "降级时，目标版本不存在的新方块、物品和实体无法无损表达；原 ZIP 始终保留。";
+    els.warning.className = "warning";
+  } else {
+    els.warning.textContent = "降级到旧版本时，目标版本不存在的新方块、物品和实体无法无损表达。";
+    els.warning.className = "warning";
+  }
+}
+
+function fillTargets(selected) {
+  els.target.innerHTML = TARGETS.map(function (v) {
+    return '<option value="' + v + '">Java ' + v + "</option>";
+  }).join("");
+  els.target.disabled = false;
+  if (selected) els.target.value = selected;
+}
+
+function showModal(title, body, okText, cancelText) {
+  els.modalTitle.textContent = title;
+  els.modalBody.textContent = body;
+  els.modalOk.textContent = okText || "确定";
+  els.modalCancel.textContent = cancelText || "取消";
+  els.modalCancel.classList.toggle("hidden", !cancelText);
+  els.backdrop.classList.remove("hidden");
+}
+
+function closeModal() { els.backdrop.classList.add("hidden"); }
+
+function hideOverlay() { els.dropOverlay.classList.add("hidden"); }
+
+function showOverlay() { els.dropOverlay.classList.remove("hidden"); }
+
+function stopTelemetry() {
+  if (telemetryTimer) clearInterval(telemetryTimer);
+  telemetryTimer = null;
+  els.resourceMetrics.classList.remove("running");
+  els.bar.classList.remove("active");
+}
+
+function fmtElapsed(ms) {
+  var s = Math.floor(ms / 1000);
+  return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+
+function startTelemetry() {
+  stopTelemetry();
+  telemetryStartedAt = Date.now() - 34000; // 模拟已运行 00:34
+  cpuValue = 58;
+  memoryValue = 1.28;
+  els.resourceMetrics.classList.add("running");
+  els.bar.classList.add("active");
+  tickTelemetry();
+  telemetryTimer = setInterval(tickTelemetry, 1000);
+}
+
+function tickTelemetry() {
+  els.metricElapsed.textContent = "已运行 " + fmtElapsed(Date.now() - telemetryStartedAt);
+  cpuValue = Math.max(48, Math.min(78, cpuValue + Math.round(Math.random() * 7 - 3)));
+  memoryValue += 0.004;
+  els.metricCpu.textContent = "CPU " + cpuValue + "%";
+  els.metricMemory.textContent = "内存 " + memoryValue.toFixed(2) + " GiB";
+}
+
+function resetBasics() {
+  stopTelemetry();
+  els.input.value = "";
+  els.target.innerHTML = "";
+  els.target.disabled = true;
+  els.details.textContent = "";
+  els.save.disabled = true;
+  els.report.disabled = true;
+  els.start.disabled = true;
+  els.start.textContent = "开始转换";
+  els.choose.disabled = false;
+  setDetection("尚未选择存档", "idle");
+  setProgress(0);
+  els.progressText.textContent = "0%";
+  setStage("等待选择 ZIP");
+  els.warning.textContent = "降级到旧版本时，目标版本不存在的新方块、物品和实体无法无损表达。";
+  els.warning.className = "warning";
+  els.log.innerHTML = "";
+  closeModal();
+  hideOverlay();
+}
+
+/* ---------- 模拟日志样本 ---------- */
+
+var LOG_SUCCESS = [
+  { t: "[12:04:31] [INFO] 存档校验通过：SHA-256 9f3a…c41e（与本机预处理一致）" },
+  { t: "[12:04:33] [INFO] 读取确认：这是网易基岩版存档（level.dat 含 NetEase 标记）" },
+  { t: "[12:04:35] [INFO] 区域数据：region/ 1284 个文件 · 基岩 LevelDB 结构" },
+  { t: "[12:04:36] [INFO] 可选目标 10 个：Java 1.21.4 … 1.12.2" },
+  { t: "[12:04:36] [INFO] 提示：降级转换时，目标版本不存在的新方块、物品和实体无法无损表达（见下方警告）。" },
+];
+
+var LOG_CONVERTING = [
+  { t: "[12:04:31] [INFO] 存档校验通过：SHA-256 9f3a…c41e（与本机预处理一致）" },
+  { t: "[12:04:33] [INFO] 读取确认：这是网易基岩版存档（level.dat 含 NetEase 标记）" },
+  { t: "[12:04:35] [INFO] 识别结果：网易基岩版（可解密）· 基岩 LevelDB" },
+  { t: "[12:04:38] [INFO] 映射表加载：Bedrock → Java 1.20.4（4172 条规则）" },
+  { t: "[12:04:41] [INFO] 转换 r.0.0.mca：区域记录 1024 / 1024 完成" },
+  { t: "[12:04:44] [INFO] 转换 r.0.1.mca：区域记录 996 / 1024 完成" },
+  { t: "[12:04:52] [INFO] 转换 r.1.0.mca：区域记录 1008 / 1024 完成" },
+  { t: "[12:05:03] [INFO] 转换 r.1.1.mca：区域记录 512 / 1024 完成" },
+  { t: "[12:05:07] [INFO] 25057 chunks converted", cls: "ok" },
+  { t: "[12:05:07] [INFO] 正在生成 region 头部与生物群系哈希校验……" },
+];
+
+var LOG_FAILURE = [
+  { t: "[12:05:07] [INFO] 25057 chunks converted", cls: "ok" },
+  { t: "[12:05:09] ERROR: r.1.-1.mca 写入失败：I/O error (os error 28)", cls: "err" },
+  { t: "[12:05:09] ERROR: 无法分配临时区块数据（磁盘空间不足）", cls: "err" },
+  { t: "[12:05:10] [WARN] 输出文件已回滚，原始 ZIP 未做任何修改", cls: "warn" },
+  { t: "[12:05:10] [INFO] 错误报告：C:\\Users\\azure\\AppData\\Local\\Temp\\nwc_error_report_20250412_1423.txt" },
+];
+
+var SAMPLE_PATH = "D:\\下载\\网易基岩_生存小分队_2025-04-12.zip";
+var SAMPLE_DETAILS = "世界：生存大世界　文件：1284　大小：84.32 MiB";
+
+/* ---------- 五个演示状态（对应真实 UI 的可达状态） ---------- */
+
+function demoIdle() {
+  resetBasics();
+}
+
+function demoSuccess() {
+  resetBasics();
+  els.input.value = SAMPLE_PATH;
+  setDetection("✓ 网易基岩版（可解密）· 基岩 LevelDB", "ok");
+  setProgress(12);
+  setStage("解析成功");
+  fillTargets("1.20.4");
+  els.details.textContent = SAMPLE_DETAILS;
+  els.start.disabled = false;
+  renderLog(LOG_SUCCESS);
+  refreshDowngradeWarning();
+}
+
+function demoConverting() {
+  resetBasics();
+  els.input.value = SAMPLE_PATH;
+  setDetection("✓ 网易基岩版（可解密）· 基岩 LevelDB", "ok");
+  setProgress(57);
+  setStage("正在转换到 Java 1.20.4 · 写入区域 r.1.-1.mca（剩余 43%）");
+  fillTargets("1.20.4");
+  els.details.textContent = SAMPLE_DETAILS;
+  els.choose.disabled = true;
+  els.target.disabled = true;
+  els.start.disabled = false;
+  els.start.textContent = "取消转换";
+  renderLog(LOG_CONVERTING);
+  startTelemetry();
+}
+
+function demoFailure() {
+  resetBasics();
+  els.input.value = SAMPLE_PATH;
+  setDetection("✓ 网易基岩版（可解密）· 基岩 LevelDB", "idle"); // 转换开始时识别结果转为 idel 弱化（同 main.js）
+  setProgress(13);
+  els.progressText.textContent = "转换失败";
+  setStage("写入 r.1.-1.mca 时发生 I/O 错误：磁盘空间不足（可用 412.0 MiB）", "error");
+  fillTargets("1.20.4");
+  els.details.textContent = SAMPLE_DETAILS;
+  els.report.disabled = false; // 错误报告已导出
+  renderLog(LOG_FAILURE);
+  showModal(
+    "转换失败",
+    "转换失败。原始 ZIP 没有被修改。\n\n写入 r.1.-1.mca 时发生 I/O 错误：磁盘空间不足（可用 412.0 MiB，任务需要约 1.2 GiB）。\n\n错误报告：\nC:\\Users\\azure\\AppData\\Local\\Temp\\nwc_error_report_20250412_1423.txt",
+    "确定", null
+  );
+}
+
+function demoDowngrade() {
+  resetBasics();
+  els.input.value = SAMPLE_PATH;
+  setDetection("✓ 网易基岩版（可解密）· 基岩 LevelDB", "ok");
+  setProgress(12);
+  setStage("解析成功");
+  fillTargets("1.16.5");
+  els.details.textContent = SAMPLE_DETAILS;
+  els.start.disabled = false;
+  renderLog(LOG_SUCCESS);
+  refreshDowngradeWarning(); // 1.16.5 → 触发 severe 大跨度降级警告
+  showModal(
+    "确认降级转换",
+    "这是降级转换（1.21.4 → 1.16.5）。\n\n旧版本无法表示后来加入的方块、物品、生物和数据组件；无法映射的源实体、POI 与玩家文件会保存在输出 ZIP 的 _NWC_preserved_source 中。\n\n仍要继续吗？",
+    "继续", "取消"
+  );
+}
+
+/* ---------- 状态切换与控件接线 ---------- */
+
+var DEMOS = {
+  idle: demoIdle,
+  success: demoSuccess,
+  converting: demoConverting,
+  failure: demoFailure,
+  downgrade: demoDowngrade,
+  drop: showOverlay,
+};
+
+function setDemo(state) {
+  stopTelemetry();
+  closeModal();
+  hideOverlay();
+  (DEMOS[state] || demoIdle)();
+  document.querySelectorAll(".demo-btn").forEach(function (b) {
+    b.classList.toggle("active", b.dataset.state === state);
+  });
+}
+
+document.querySelectorAll(".demo-btn").forEach(function (b) {
+  b.addEventListener("click", function () { setDemo(b.dataset.state); });
+});
+
+els.modalOk.addEventListener("click", closeModal);
+els.modalCancel.addEventListener("click", closeModal);
+
+/* 初始：空闲态 */
+demoIdle();
+</script>
+</body>
+</html>

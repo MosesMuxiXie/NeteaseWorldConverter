@@ -14,3 +14,5 @@ release/
 e2e-*.zip
 *-error-*.log
 *.log
+.agent-teams/
+scripts/chunker-matrix*-results.csv

@@ -1,4 +1,18 @@
-# NeteaseWorldConverter 1.2.1 发布说明
+# NeteaseWorldConverter 2.0.0 发布说明
+
+## 2.0.0：新的界面，更完整的转换流程
+
+- 樱色与奶油白双栏界面，按“选择存档 → 设置版本 → 保存世界”引导操作；小窗口也能显示关键操作。
+- 转换完成后显示结果卡片，明确区分“转换完成”和“已保存”，减少重复弹窗。
+- 修复 Tauri 进度与日志事件订阅，补齐主窗口所需事件和关闭权限。
+- 版本检查、文件选择与保存期间锁定当前会话，防止重复点击和文件切换导致状态串扰。
+- 取消后可重新转换；更换存档、重新转换或退出时保护尚未保存的结果。
+- 保存禁止覆盖原始存档，采用同目录临时文件写入后替换，失败时保留已有目标文件。
+- 降级提示使用后端版本判断；模态框支持键盘焦点、Escape 和屏幕阅读器，日志阅读不再被强制滚动打断。
+- 支持 Java 26.3 目标，修复后端退出时日志收尾、输出目录准备和错误信息保留。
+- 增加前端流程回归、真实 WebView 流程与保存安全测试；修正测试世界的 ZIP/NBT 生成。
+
+本地验证：18 项 Rust 单元测试、前端流程回归、Java 测试世界识别/转换/保存端到端，以及最小窗口布局、降级确认、取消后重试与解析失败恢复。原生文件对话框输入未完成自动化验证。
 
 ## 平台与形态
 
@@ -8,7 +22,7 @@
 | Windows arm64 | NSIS（`*-arm64-setup.exe`） | 原生 arm64 应用与 Java 运行时；b2j 优先源码构建原生 arm64 版，失败回退 vendored x64（经 Win11 ARM 模拟层运行） |
 | macOS x64 / arm64 | `.dmg` | CI 构建；b2j 从 je2be-core 源码本机构建 |
 
-四个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑 `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`（13 项单元测试），全部通过后才开始出安装包。
+四个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑前端流程回归、`cargo fmt --check`、`cargo clippy -D warnings` 和 `cargo test`，全部通过后才开始出安装包。
 
 ## 1.2.1 相对 1.2.0 的变化
 
@@ -54,7 +68,7 @@
 
 ## 安装
 
-1. 双击 `NeteaseWorldConverter_1.2.1_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包。
+1. 双击 `NeteaseWorldConverter_2.0.0_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包。
 2. 数据全程本机处理，原始 ZIP 永不修改。
 
 ## 校验

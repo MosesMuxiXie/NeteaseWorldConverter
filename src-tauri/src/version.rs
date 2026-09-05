@@ -117,4 +117,24 @@ mod tests {
             "JAVA_26_2"
         );
     }
+
+    #[test]
+    fn parses_and_formats_modern_26_3() {
+        assert_eq!(
+            parse_version("Java 26.3"),
+            Some(Version {
+                major: 26,
+                minor: 3,
+                patch: 0
+            })
+        );
+        assert_eq!(
+            chunker_format(Version {
+                major: 26,
+                minor: 3,
+                patch: 0
+            }),
+            "JAVA_26_3"
+        );
+    }
 }

@@ -72,12 +72,14 @@ npm run build
 
 ## 测试
 
-- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密密钥恢复、Anvil 验证器、版本比较、XOR 字块对拍、多命名空间实体保留、ZIP 嗅探、资源统计，13 项）。
+- **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密、Anvil 验证、版本比较、实体保留、资源统计、原始存档保护与安全保存）。
+- **前端流程回归**：`node scripts/ui-flow-test.mjs`（事件订阅、重复点击、保存取消、未保存结果、取消与重试；无需额外依赖）。
 - **端到端（推荐）**：用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` 启动应用后：
   - `node scripts/make-test-world.mjs` — 生成最小 Java 1.21 测试世界 ZIP
   - `node scripts/devtools-e2e.mjs 9223 <输入.zip> <输出.zip> <目标版本>` — 走完整 analyze→convert→save 流程
   - `node scripts/devtools-analyze.mjs 9223 <输入.zip>` — 仅识别
   - `node scripts/backend-probe.mjs 9223` — 查询后端定位结果
+  - `node scripts/make-test-world.mjs e2e-flow-world.zip` 后运行 `node scripts/devtools-workflow-test.mjs` — 在调试实例中验证最小窗口布局、降级确认、取消后的会话重试与解析失败恢复；会重置该测试实例的页面与会话。
 
 ## 许可
 

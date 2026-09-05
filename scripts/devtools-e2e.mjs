@@ -1,10 +1,13 @@
 // devtools-e2e.mjs — 通过 WebView2 调试协议驱动应用执行完整转换流程。
 import { readFileSync, existsSync, statSync } from "node:fs";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 const port = process.argv[2] || "9223";
 const inputZip = process.argv[3];
 const outputZip = process.argv[4];
 const target = process.argv[5] || "Java 1.21";
+const inputHash = createHash('sha256').update(readFileSync(inputZip)).digest('hex');
 
 const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
 const page = list.find((p) => p.type === "page");
@@ -57,19 +60,21 @@ const analysis = await evaluate(`(async () => {
   };
 })()`);
 console.log("analysis:", j(analysis));
+assert.equal(analysis.supported, true);
+assert.equal(analysis.startDisabled, false);
 
 // 3. 降级判断
 const downgrade = await evaluate(`window.__TAURI__.core.invoke("is_downgrade", { sessionId: session.sessionId, target: ${j(target)} })`);
 console.log("is_downgrade:", j(downgrade));
 
 // 4. 转换（页面同一入口 startConversion；成功弹窗在等待期间点掉）
-await evaluate(`(window.__convDone = null, window.__convError = null, startConversion(${j(target)}).then(() => { window.__convDone = true; }).catch((e) => { window.__convError = String(e && e.message || e); }), "started")`, false);
+await evaluate(`(document.getElementById("target-box").value = ${j(target)}, window.__convDone = null, window.__convError = null, startConversion(${j(target)}).then(() => { window.__convDone = true; }).catch((e) => { window.__convError = String(e && e.message || e); }), "started")`, false);
 {
   const deadline = Date.now() + 300000;
   let modalClicked = false;
   for (;;) {
     const st = await evaluate(`JSON.stringify({
-      modalVisible: !document.getElementById("modal-backdrop").classList.contains("hidden"),
+      modalVisible: document.getElementById("modal-backdrop").open,
       done: window.__convDone === true,
       error: window.__convError,
       stage: document.getElementById("stage-label").textContent,
@@ -95,10 +100,16 @@ const conversion = await evaluate(`JSON.stringify({
   logTail: document.getElementById("log-area").textContent.slice(-800),
 })`);
 console.log("conversion:", conversion);
+assert.equal(JSON.parse(conversion).saveDisabled, false);
+assert.equal(JSON.parse(conversion).result.targetVersion, target);
+
+const protectedInput = await evaluate(`window.__TAURI__.core.invoke("save_result", { sessionId: session.sessionId, destination: ${j(inputZip)} }).then(() => false, () => true)`);
+assert.equal(protectedInput, true, 'saving must never overwrite the source archive');
 
 // 5. 保存结果
 const saved = await evaluate(`window.__TAURI__.core.invoke("save_result", { sessionId: session.sessionId, destination: ${j(outputZip)} })`);
 console.log("save_result:", j(saved));
+assert.equal(createHash('sha256').update(readFileSync(inputZip)).digest('hex'), inputHash);
 
 // 6. 清理
 await evaluate(`window.__TAURI__.core.invoke("shutdown_cleanup")`).catch(() => {});

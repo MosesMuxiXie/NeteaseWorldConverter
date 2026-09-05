@@ -9,7 +9,7 @@ use crate::backends;
 use crate::decrypt;
 use crate::detect;
 use crate::entity;
-use crate::error::{conv, conv_code, ConversionError, Result, CODE_CANCELLED};
+use crate::error::{conv, ConversionError, Result};
 use crate::log::AppLog;
 use crate::models::{
     AnalysisDto, ConversionResultDto, LogPayload, TargetVersion, WorldInfo, WorldType,
@@ -45,6 +45,15 @@ pub struct Session {
 
 /// convert 返回（无论成功失败）后复位 converting 标记。
 struct ConvertGuard<'a>(&'a AtomicBool);
+
+impl<'a> ConvertGuard<'a> {
+    fn acquire(active: &'a AtomicBool) -> Result<Self> {
+        active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| ConversionError::from("该会话正在转换或保存，请等待当前操作完成"))?;
+        Ok(Self(active))
+    }
+}
 
 impl Drop for ConvertGuard<'_> {
     fn drop(&mut self) {
@@ -252,17 +261,10 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
 
 pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<ConversionResultDto> {
     let session = find_session(session_id)?;
-    if session.cancel.load(Ordering::Relaxed) {
-        return conv_code(CODE_CANCELLED, "操作已取消");
-    }
-    if session
-        .converting
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return conv("该会话正在转换中，请等待完成或取消");
-    }
-    let _convert_guard = ConvertGuard(&session.converting);
+    let _convert_guard = ConvertGuard::acquire(&session.converting)?;
+    // 取消属于上一次操作；取得独占权之后才允许开始新的转换。
+    session.cancel.store(false, Ordering::Relaxed);
+    *session.result.lock().unwrap() = None;
 
     if session.world.world_type == WorldType::NeteaseBedrockLegacyAes {
         return conv("该存档使用旧版 AES-CFB8 加密，密钥不在存档中，无法离线转换");
@@ -293,6 +295,11 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     let bedrock_out = work.join("bedrock");
     let je2be_out = work.join("je2be");
     let chunker_out = work.join("chunker");
+    // Chunker 不会自行创建输出目录；b2j / je2be 的早期失败也常因目标目录缺失，
+    // 因此在分发到各后端前统一建好所有输出目录（create_dir_all 幂等）。
+    fs::create_dir_all(&bedrock_out)?;
+    fs::create_dir_all(&je2be_out)?;
+    fs::create_dir_all(&chunker_out)?;
     let mut notes: Vec<String> = Vec::new();
 
     let final_world: PathBuf = match session.world.world_type {
@@ -507,6 +514,7 @@ fn preserve_bedrock_assets(
 
 pub fn save_result(session_id: &str, destination: &str) -> Result<String> {
     let session = find_session(session_id)?;
+    let _save_guard = ConvertGuard::acquire(&session.converting)?;
     let stored = session
         .result
         .lock()
@@ -517,10 +525,30 @@ pub fn save_result(session_id: &str, destination: &str) -> Result<String> {
     if destination.extension().is_none() {
         destination.set_extension("zip");
     }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
+    let source = fs::canonicalize(&session.input_zip)?;
+    if let Ok(existing) = fs::canonicalize(&destination) {
+        let same = existing == source
+            || (cfg!(windows)
+                && existing
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&source.to_string_lossy()));
+        if same {
+            return conv("不能覆盖原始存档，请选择其他文件名或保存位置");
+        }
     }
-    fs::copy(&stored.result_zip, &destination)?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    // 同目录暂存，完整写入后原子替换；失败时保留目标文件及可重试的转换结果。
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut source_zip = fs::File::open(&stored.result_zip)?;
+    std::io::copy(&mut source_zip, staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist(&destination)
+        .map_err(|error| ConversionError::from(error.error))?;
     Ok(destination.display().to_string())
 }
 
@@ -714,31 +742,103 @@ pub fn pick_save_path(default_name: &str) -> Option<String> {
 }
 
 pub fn open_path(path: &str) -> Result<()> {
+    let target = Path::new(path);
+    if !target.exists() {
+        return conv(format!("要打开的文件不存在：{path}"));
+    }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{path}"))
+        // 与 Swing 版 Desktop.open() 一致：打开文件本身而非资源管理器定位
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(path)
             .spawn()
-            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件：{error}")))?;
     }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg("-R")
             .arg(path)
             .spawn()
-            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件：{error}")))?;
     }
     #[cfg(target_os = "linux")]
     {
-        let target = Path::new(path)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(path));
         std::process::Command::new("xdg-open")
-            .arg(target)
+            .arg(path)
             .spawn()
-            .map_err(|error| ConversionError::from(format!("无法打开文件位置：{error}")))?;
+            .map_err(|error| ConversionError::from(format!("无法打开文件：{error}")))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+
+    #[test]
+    fn operation_guard_blocks_overlap_and_releases_for_retry() {
+        let active = AtomicBool::new(false);
+        let guard = ConvertGuard::acquire(&active).unwrap();
+        assert!(ConvertGuard::acquire(&active).is_err());
+        drop(guard);
+        assert!(ConvertGuard::acquire(&active).is_ok());
+    }
+
+    #[test]
+    fn saving_protects_input_and_preserves_existing_file_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("original.zip");
+        let output = temp.path().join("converted.zip");
+        let destination = temp.path().join("saved.zip");
+        fs::write(&input, b"original world").unwrap();
+        fs::write(&output, b"converted world").unwrap();
+        let id = new_session_id();
+        let session = Arc::new(Session {
+            session_id: id.clone(),
+            input_zip: input.clone(),
+            extracted: temp.path().join("extracted"),
+            world: WorldInfo {
+                root: temp.path().to_path_buf(),
+                database_directory: None,
+                world_type: WorldType::Java,
+                detected_version: "1.21".into(),
+                world_name: "test".into(),
+                file_count: 0,
+                byte_count: 0,
+                notes: vec![],
+            },
+            targets: vec![],
+            cancel: Arc::new(AtomicBool::new(false)),
+            converting: AtomicBool::new(false),
+            log: Arc::new(AppLog::new(&temp.path().join("test.log")).unwrap()),
+            result: Mutex::new(Some(StoredResult {
+                result_zip: output.clone(),
+                file_name: "converted.zip".into(),
+                target_version: "1.21".into(),
+                region_files: 0,
+                region_chunks: 0,
+                region_note: String::new(),
+            })),
+            temp_dir: temp,
+        });
+        sessions()
+            .lock()
+            .unwrap()
+            .insert(id.clone(), session.clone());
+        let protected = save_result(&id, input.to_str().unwrap());
+        assert!(
+            protected.is_err(),
+            "saving over the source must be rejected"
+        );
+        assert_eq!(fs::read(&input).unwrap(), b"original world");
+        save_result(&id, destination.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"converted world");
+        fs::remove_file(&output).unwrap();
+        assert!(save_result(&id, destination.to_str().unwrap()).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"converted world");
+        sessions().lock().unwrap().remove(&id);
+    }
 }

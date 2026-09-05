@@ -10,10 +10,10 @@ function nbtLevelDat() {
   const nbt = [];
   nbt.push(0x0a, 0x00, 0x00); // root ""
   nbt.push(0x0a, 0x00, 0x04, ...Buffer.from("Data"));
-  nbt.push(0x03, 0x00, 0x0b, ...Buffer.from("DataVersion"), 0x00, 0x00, 0x10, 0x5d); // 3955
+  nbt.push(0x03, 0x00, 0x0b, ...Buffer.from("DataVersion"), 0x00, 0x00, 0x0f, 0x73); // 3955
   nbt.push(0x08, 0x00, 0x09, ...Buffer.from("LevelName"), 0x00, 0x09, ...Buffer.from("E2E测试"));
   nbt.push(0x0a, 0x00, 0x07, ...Buffer.from("Version"));
-  nbt.push(0x08, 0x00, 0x04, ...Buffer.from("Name"), 0x00, 0x05, ...Buffer.from("1.21.4"));
+  nbt.push(0x08, 0x00, 0x04, ...Buffer.from("Name"), 0x00, 0x04, ...Buffer.from("1.21"));
   nbt.push(0x00); // end Version
   nbt.push(0x00); // end Data
   nbt.push(0x00); // end root
@@ -86,8 +86,8 @@ function makeZip() {
   const centralSize = central.reduce((s, b) => s + b.length, 0);
   const eocd = Buffer.alloc(22);
   eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(files.length, 8);
-  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt16LE(Object.keys(files).length, 8);
+  eocd.writeUInt16LE(Object.keys(files).length, 10);
   eocd.writeUInt32LE(centralSize, 12);
   eocd.writeUInt32LE(offset, 16);
   return Buffer.concat([...chunks, ...central, eocd]);

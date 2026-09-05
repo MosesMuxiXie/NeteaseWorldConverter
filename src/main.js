@@ -1,7 +1,8 @@
 // 网易 Minecraft 存档转换器 — Tauri 前端
 // 与原 Swing 版行为一致：选 ZIP → 识别 → 选目标版本 →（降级需确认）转换 → 保存。
 
-const { invoke, listen } = window.__TAURI__.core;
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getCurrentWebview } = window.__TAURI__.webview;
 
@@ -37,24 +38,30 @@ const els = {
 let session = null;      // { sessionId, type, supported, targets, ... }
 let busy = false;        // 分析或转换进行中（两者都独占 UI 与后端流水线）
 let converting = false;  // 仅转换进行中
+let canCancel = false;   // 后台首次进度表示转换已取得独占权
 let cancelRequested = false;
 let errorReportPath = null;
 let modalResolve = null;
 let logBuffer = [];
 let telemetryTimer = null;
 let telemetryStartedAt = 0;
+let phase = "idle";
+let savedPath = null;
+let ready = false;
+let modalFocus = null;
 const MAX_LOG_LINES = 1500;
 
 // ---------- 日志与进度 ----------
 
 function appendLog(line) {
   if (!line) return;
+  const follow = els.log.scrollHeight - els.log.scrollTop - els.log.clientHeight < 40;
   logBuffer.push(line);
   if (logBuffer.length > MAX_LOG_LINES) {
     logBuffer.splice(0, logBuffer.length - MAX_LOG_LINES);
   }
   els.log.textContent = logBuffer.join("\n") + "\n";
-  els.log.scrollTop = els.log.scrollHeight;
+  if (follow) els.log.scrollTop = els.log.scrollHeight;
 }
 
 // 后端错误统一为 {"code":"...","message":"..."} JSON 字符串；纯文本旧格式兜底
@@ -70,7 +77,7 @@ function parseError(err) {
   }
   return {
     code: (err && err.code) || "error",
-    message: (err && (err.message ?? err.message)) || String(err),
+    message: (err && err.message) || String(err),
   };
 }
 
@@ -89,22 +96,30 @@ function setStage(text, cls) {
 // ---------- 模态框 ----------
 
 function showModal(title, body, okText, cancelText) {
+  if (modalResolve) return Promise.resolve(false);
+  modalFocus = document.activeElement;
   els.modalTitle.textContent = title;
   els.modalBody.textContent = body;
   els.modalOk.textContent = okText || "确定";
   els.modalCancel.textContent = cancelText || "取消";
   els.modalCancel.classList.toggle("hidden", !cancelText);
-  els.backdrop.classList.remove("hidden");
+  els.backdrop.showModal();
+  (cancelText ? els.modalCancel : els.modalOk).focus();
   return new Promise((resolve) => { modalResolve = resolve; });
 }
 
-els.modalOk.addEventListener("click", () => {
-  els.backdrop.classList.add("hidden");
-  if (modalResolve) { modalResolve(true); modalResolve = null; }
-});
-els.modalCancel.addEventListener("click", () => {
-  els.backdrop.classList.add("hidden");
-  if (modalResolve) { modalResolve(false); modalResolve = null; }
+function closeModal(confirmed) {
+  els.backdrop.close();
+  const resolve = modalResolve;
+  modalResolve = null;
+  modalFocus?.focus();
+  resolve?.(confirmed);
+}
+els.modalOk.addEventListener("click", () => closeModal(true));
+els.modalCancel.addEventListener("click", () => closeModal(false));
+els.backdrop.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeModal(false);
 });
 
 // ---------- 状态刷新 ----------
@@ -115,8 +130,12 @@ function resetUiForAnalyze() {
   session = null;
   errorReportPath = null;
   cancelRequested = false;
+  savedPath = null;
+  phase = "analyzing";
+  $("result-card").classList.add("hidden");
   logBuffer = [];
   els.target.innerHTML = "";
+  els.target.value = "";
   els.target.disabled = true;
   els.save.disabled = true;
   els.report.disabled = true;
@@ -125,16 +144,36 @@ function resetUiForAnalyze() {
   els.detection.className = "detection";
   els.details.textContent = "";
   els.log.textContent = "";
+  refreshDowngradeWarning();
   setProgress(0);
   setStage("读取 ZIP · 计算 SHA-256");
 }
 
 function setBusy(isBusy) {
-  const changed = busy !== isBusy;
   busy = isBusy;
-  els.choose.disabled = isBusy;
+  els.choose.disabled = isBusy || !ready;
   els.input.disabled = isBusy;
-  if (changed) isBusy ? startTelemetry() : stopTelemetry();
+  els.target.disabled = isBusy || !session?.supported || !session.targets.length;
+  els.start.disabled = converting ? cancelRequested || !canCancel : isBusy || !session?.supported || !els.target.value;
+  els.start.textContent = converting ? (cancelRequested ? "正在取消…" : canCancel ? "取消转换" : "正在准备…") : session?.result ? "重新转换" : "开始转换";
+  els.start.classList.toggle("plain", converting || !!session?.result);
+  els.start.classList.toggle("primary", !converting && !session?.result);
+  els.save.disabled = isBusy || !session?.result;
+  els.report.disabled = isBusy || !errorReportPath;
+  els.choose.textContent = session ? "更换存档" : "选择存档";
+  els.save.textContent = savedPath ? "另存一份 ZIP" : "保存 ZIP";
+  $("workflow").dataset.step = session?.result ? "3" : session?.supported ? "2" : "1";
+  document.querySelectorAll(".flow-step").forEach((step, index) => {
+    if (index + 1 === Number($("workflow").dataset.step)) step.setAttribute("aria-current", "step");
+    else step.removeAttribute("aria-current");
+  });
+  $("flow-hint").textContent = isBusy ? "正在处理，请稍候" : session?.result ?
+    (savedPath ? "已保存，可以导入 Minecraft 了" : "转换完成，保存后即可使用") : session?.supported ?
+    "选择你准备游玩的 Java 版本" : "从一个世界，开始新的旅程";
+  els.dropOverlay.classList.add("hidden");
+  if (isBusy && (phase === "analyzing" || converting)) {
+    if (!telemetryTimer) startTelemetry();
+  } else if (telemetryTimer) stopTelemetry();
 }
 
 function resetTelemetry() {
@@ -180,33 +219,48 @@ function formatElapsed(milliseconds) {
 }
 
 function applyProgress(p) {
-  if (typeof p.percent === "number") {
+  if (acceptEvent(p) && Number.isFinite(p.percent)) {
+    if (converting && !canCancel) { canCancel = true; setBusy(true); }
     setProgress(p.percent);
     setStage(p.stage + (p.detail ? " · " + p.detail : ""));
   }
 }
 
+function acceptEvent(payload) {
+  return (phase === "analyzing" && busy) || (converting && payload.sessionId === session?.sessionId);
+}
+
 function detectionOk(text) { els.detection.textContent = text; els.detection.className = "detection ok"; }
 function detectionFail(text) { els.detection.textContent = text; els.detection.className = "detection error"; }
 
-function refreshDowngradeWarning() {
-  const v = els.target.value || "";
-  if (/^1\.1[2-6](\D|$)/.test(v)) {
-    els.warning.textContent = `⚠ 大跨度降级：新版本内容无法在 ${v} 中表示；请务必保留原 ZIP。`;
-    els.warning.className = "warning severe";
-  } else if (v) {
-    els.warning.textContent = "降级时，目标版本不存在的新方块、物品和实体无法无损表达；原 ZIP 始终保留。";
-    els.warning.className = "warning";
-  } else {
-    els.warning.textContent = "降级到旧版本时，目标版本不存在的新方块、物品和实体无法无损表达。";
-    els.warning.className = "warning";
+async function refreshDowngradeWarning() {
+  const current = session;
+  const target = els.target.value;
+  els.warning.className = "warning";
+  els.warning.textContent = "识别存档后，将显示可用的目标版本。";
+  if (!current?.supported || !target) return;
+  try {
+    const downgrade = await invoke("is_downgrade", { sessionId: current.sessionId, target });
+    if (session !== current || els.target.value !== target) return;
+    els.warning.className = downgrade ? "warning severe" : "warning neutral";
+    els.warning.textContent = downgrade ? "降级转换：新方块、物品和实体可能无法保留。开始前会再次确认。" :
+      "输出为 Java 存档 ZIP；原始存档保留，可放心另存。";
+  } catch (err) {
+    if (session === current && els.target.value === target) els.warning.textContent = "版本检查失败：" + parseError(err).message;
   }
+}
+
+function confirmDiscard() {
+  return !session?.result || savedPath ? Promise.resolve(true) : showModal(
+    "还有未保存的转换结果", "继续后将离开当前结果。建议先保存 ZIP，以免需要重新转换。", "继续", "返回保存");
 }
 
 // ---------- 分析 ----------
 
 async function analyze(path) {
-  if (busy) return;
+  if (busy || modalResolve || !ready) return;
+  setBusy(true);
+  if (!await confirmDiscard()) { setBusy(false); return; }
   resetUiForAnalyze();
   els.input.value = path;
   setBusy(true);
@@ -217,7 +271,7 @@ async function analyze(path) {
     if (result.supported) {
       detectionOk("✓ " + result.typeName + " · " + result.detectedVersion);
       setProgress(12);
-      setStage("解析成功");
+      setStage("识别完成 · 选择目标版本后开始转换", "ok");
       for (const t of result.targets) {
         const opt = document.createElement("option");
         opt.value = t.displayName;
@@ -227,9 +281,11 @@ async function analyze(path) {
       els.target.disabled = false;
       els.target.selectedIndex = 0;
       els.start.disabled = false;
+      phase = "ready";
     } else {
       detectionFail("✕ " + result.typeName + " · " + result.detectedVersion);
-      setStage("已识别，但该旧加密格式需要外部账号密钥；诊断报告已导出", "error");
+      phase = "unsupported";
+      setStage("旧版 AES 加密无法离线转换" + (errorReportPath ? " · 可打开诊断报告查看详情" : ""), "error");
     }
     els.details.textContent =
       `世界：${result.worldName}　文件：${result.fileCount}　大小：${formatBytes(result.byteCount)}`;
@@ -240,6 +296,7 @@ async function analyze(path) {
     }
     refreshDowngradeWarning();
   } catch (err) {
+    phase = "error";
     await handleAnalysisFailure(path, err);
   } finally {
     setBusy(false);
@@ -268,12 +325,25 @@ async function handleAnalysisFailure(path, err) {
 
 els.start.addEventListener("click", async () => {
   if (converting) {
+    if (cancelRequested || !canCancel) return;
     cancelRequested = true;
-    await invoke("cancel", { sessionId: session.sessionId });
+    setBusy(true);
+    setStage("正在取消 · 等待后台任务结束", "warn");
+    try { await invoke("cancel", { sessionId: session.sessionId }); }
+    catch (err) {
+      if (converting) {
+        cancelRequested = false;
+        setBusy(true);
+        setStage("取消失败，可重试：" + parseError(err).message, "error");
+      }
+    }
     return;
   }
-  if (!session || !session.supported || !els.target.value) return;
+  if (busy || modalResolve || !session?.supported || !els.target.value) return;
+  setBusy(true);
   const target = els.target.value;
+  try {
+  if (!await confirmDiscard()) return;
   const downgrade = await invoke("is_downgrade", { sessionId: session.sessionId, target });
   if (downgrade) {
     const ok = await showModal(
@@ -286,44 +356,47 @@ els.start.addEventListener("click", async () => {
     if (!ok) return;
   }
   await startConversion(target);
+  } catch (err) {
+    await showModal("无法开始转换", parseError(err).message, "确定");
+  } finally { setBusy(false); }
 });
 
 async function startConversion(target) {
+  if (converting || !session?.supported) return;
   converting = true;
+  canCancel = false;
+  phase = "converting";
   cancelRequested = false;
   errorReportPath = null;
+  session.result = null;
+  savedPath = null;
+  $("result-card").classList.add("hidden");
   setBusy(true); // 转换期间禁用选择/拖放，避免两条流水线的进度与日志交叉污染
   els.save.disabled = true;
   els.report.disabled = true;
   els.target.disabled = true;
-  els.start.textContent = "取消转换";
-  els.start.disabled = false;
   setProgress(13);
-  setStage("准备转换到 Java " + target);
-  els.detection.classList.add("idle");
+  setStage("准备转换到 " + target);
+  els.detection.className = "detection idle";
   try {
     const result = await invoke("convert", { sessionId: session.sessionId, target });
-    converting = false;
-    setBusy(false);
-    els.start.textContent = "开始转换";
-    els.target.disabled = false;
+    phase = "complete";
     setProgress(100);
     els.progressText.textContent = "转换成功";
-    setStage("✓ 输出已完成并通过逐区域结构验证", "ok");
+    setStage("转换完成 · 请保存 ZIP，完成最后一步", "ok");
     session.result = result;
-    els.save.disabled = false;
-    await showModal("转换完成",
-      `转换成功！\n\n目标：${result.targetVersion}\n区域文件：${result.regionFiles}\n区域记录：${result.regionChunks}` +
-      `\n\n点击"下载 / 保存 ZIP"选择保存位置。`, "确定");
+    $("result-card").classList.remove("hidden");
+    $("result-title").textContent = "你的世界，已准备就绪";
+    $("result-details").textContent = `${result.targetVersion} · ${result.regionFiles} 个区域 · ${result.regionChunks} 条区域记录`;
+    $("result-note").textContent = result.regionNote || "输出已通过区域结构验证";
   } catch (err) {
-    converting = false;
-    setBusy(false);
-    els.start.textContent = "开始转换";
-    els.target.disabled = false;
     const parsed = parseError(err);
-    const cancelled = cancelRequested || parsed.code === "cancelled";
+    converting = false;
+    setBusy(true);
+    const cancelled = parsed.code === "cancelled";
+    phase = cancelled ? "cancelled" : "error";
     if (cancelled) {
-      setStage("转换已取消；原始 ZIP 未修改", "warn");
+      setStage("已取消 · 原始存档未修改，可以重新开始", "warn");
       els.progressText.textContent = "已取消";
     } else {
       setStage(parsed.message, "error");
@@ -335,33 +408,51 @@ async function startConversion(target) {
       await showModal("转换失败", "转换失败。原始 ZIP 没有被修改。\n\n" + parsed.message +
         (errorReportPath ? "\n\n错误报告：\n" + errorReportPath : ""), "确定");
     }
+  } finally {
+    converting = false;
+    cancelRequested = false;
+    setBusy(false);
+    if (session.result) els.save.focus();
   }
 }
 
 // ---------- 保存 / 报告 ----------
 
 els.save.addEventListener("click", async () => {
-  if (!session || !session.result) return;
-  const dest = await invoke("pick_save_path", { defaultName: session.result.fileName });
-  if (!dest) return;
+  if (busy || modalResolve || !session?.result) return;
+  setBusy(true);
   try {
+    const dest = await invoke("pick_save_path", { defaultName: session.result.fileName });
+    if (!dest) return;
     const saved = await invoke("save_result", { sessionId: session.sessionId, destination: dest });
+    savedPath = saved;
     setStage("已保存：" + saved, "ok");
-    await showModal("保存成功", "已保存：\n" + saved, "确定");
+    $("result-title").textContent = "已保存，去探索你的世界吧";
+    $("result-note").textContent = "保存位置：" + saved;
   } catch (err) {
     await showModal("保存失败", "保存失败：" + parseError(err).message, "确定");
-  }
+  } finally { setBusy(false); }
 });
 
 els.report.addEventListener("click", async () => {
-  if (errorReportPath) await invoke("open_path", { path: errorReportPath });
+  if (busy || modalResolve || !errorReportPath) return;
+  try {
+    await invoke("open_path", { path: errorReportPath });
+  } catch (err) {
+    await showModal("打开失败", "无法打开错误报告：\n" + parseError(err).message, "确定");
+  }
 });
 
 // ---------- 选择文件 ----------
 
 els.choose.addEventListener("click", async () => {
-  const path = await invoke("pick_input_path");
-  if (path) analyze(path);
+  if (busy || modalResolve || !ready) return;
+  setBusy(true);
+  let path;
+  try { path = await invoke("pick_input_path"); }
+  catch (err) { await showModal("无法选择存档", parseError(err).message, "确定"); }
+  finally { setBusy(false); }
+  if (path) await analyze(path);
 });
 
 // ---------- 拖放 ----------
@@ -369,6 +460,7 @@ els.choose.addEventListener("click", async () => {
 if (getCurrentWebview) {
   getCurrentWebview().onDragDropEvent((event) => {
     const type = event.payload?.type;
+    if (busy || modalResolve || !ready) { els.dropOverlay.classList.add("hidden"); return; }
     if (type === "enter" || type === "over") {
       els.dropOverlay.classList.remove("hidden");
     } else if (type === "leave") {
@@ -376,7 +468,9 @@ if (getCurrentWebview) {
     } else if (type === "drop") {
       els.dropOverlay.classList.add("hidden");
       const paths = event.payload.paths || [];
-      if (paths.length && !busy) {
+      if (paths.length > 1) {
+        showModal("一次处理一个世界", "请只拖入一个 .zip 或 .mcworld 存档文件。", "确定");
+      } else if (paths.length) {
         const lower = paths[0].toLowerCase();
         if (lower.endsWith(".zip") || lower.endsWith(".mcworld")) {
           analyze(paths[0]);
@@ -392,26 +486,36 @@ if (getCurrentWebview) {
 
 if (getCurrentWindow) {
   getCurrentWindow().onCloseRequested(async (event) => {
-    if (busy || converting) {
-      event.preventDefault();
-      const ok = await showModal("确认退出", "转换仍在进行。确定取消并退出吗？", "退出", "返回");
-      if (ok) {
-        cancelRequested = true;
-        if (session) { try { await invoke("cancel", { sessionId: session.sessionId }); } catch (e) {} }
-        await invoke("shutdown_cleanup");
-        getCurrentWindow().destroy();
-      }
-    } else {
-      await invoke("shutdown_cleanup");
+    event.preventDefault();
+    if (modalResolve) return;
+    // 保存过程中不可销毁临时结果；分析尚未返回会话，也需等待其结束。
+    if (busy && !converting) {
+      await showModal("请稍候", "当前操作完成后即可退出。", "确定");
+      return;
     }
+    if (converting && !await showModal("确认退出", "转换仍在进行，退出将取消当前任务。", "退出", "返回")) return;
+    // 转换可能在退出确认期间完成，需要再次保护尚未保存的结果。
+    if (!await confirmDiscard()) return;
+    try {
+      await invoke("shutdown_cleanup");
+      await getCurrentWindow().destroy();
+    } catch (err) { await showModal("无法退出", parseError(err).message, "确定"); }
   });
 }
 
 // ---------- 事件与初始化 ----------
 
 (async () => {
+  setBusy(false);
+  try {
   await listen("nwc://progress", (event) => applyProgress(event.payload));
-  await listen("nwc://log", (event) => appendLog(event.payload.line));
+  await listen("nwc://log", (event) => { if (acceptEvent(event.payload)) appendLog(event.payload.line); });
+  ready = true;
+  setBusy(false);
+  } catch (err) {
+    setStage("初始化失败，请重启应用：" + parseError(err).message, "error");
+    return;
+  }
   els.target.addEventListener("change", refreshDowngradeWarning);
   try {
     const status = await invoke("backend_status");
