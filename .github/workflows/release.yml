@@ -233,7 +233,7 @@ jobs:
           repo = os.environ["REPOSITORY"]
 
           def updater(dir_name, pattern):
-              matches = list((root / dir_name).glob(pattern))
+              matches = list((root / dir_name).rglob(pattern))
               if len(matches) != 1:
                   raise SystemExit(f"expected one {dir_name}/{pattern}, found {matches}")
               sig = matches[0]
