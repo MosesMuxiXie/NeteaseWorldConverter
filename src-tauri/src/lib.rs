@@ -19,6 +19,8 @@ pub fn run() {
     // 清扫历史实例残留的临时目录（孤儿目录与超龄会话目录）
     engine::cleanup_stale_temp();
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::analyze,
             commands::export_analysis_error,

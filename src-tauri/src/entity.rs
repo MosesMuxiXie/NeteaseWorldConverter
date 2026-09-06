@@ -10,11 +10,11 @@ use walkdir::WalkDir;
 
 const KINDS: [&str; 2] = ["entities", "poi"];
 const EXTRA_DIRS: [&str; 3] = ["playerdata", "advancements", "stats"];
-const LEGACY_DIMENSION_ROOTS: [&str; 3] = ["world", "DIM-1", "DIM1"];
+const LEGACY_DIMENSION_ROOTS: [&str; 4] = ["", "world", "DIM-1", "DIM1"];
 
 /// 收集输入世界中所有实体/POI 目录（任意命名空间、任意维度，含数据驱动维度），
 /// 返回以源路径去重后的列表。新式 `dimensions/<ns>/<dim>/<kind>` 与
-/// 旧式 `world|DIM-1|DIM1/<kind>` 都会覆盖——保证"绝不静默丢弃"覆盖到模组数据。
+/// 主世界根目录 `<kind>`、`world|DIM-1|DIM1/<kind>` 都会覆盖。
 fn collect_entity_dirs(world: &Path) -> Vec<PathBuf> {
     let mut found: BTreeSet<PathBuf> = BTreeSet::new();
     if let Ok(namespaces) = fs::read_dir(world.join("dimensions")) {
@@ -129,7 +129,8 @@ pub fn preserve(
         Ok(preserved)
     } else {
         // 升级（源 ≤ 目标）：用源文件覆盖输出的实体/POI 目录（保持同相对路径，
-        // 因此任意命名空间/维度都能落回原位），并清理输出中的旧式布局残留
+        // 因此任意命名空间/维度都能落回原位）。这些目录仍是 1.x 的有效布局，
+        // 不能在复制后作为“旧式残留”删除，否则下界/末地实体和 POI 会丢失。
         for source in &entity_dirs {
             let relative = source
                 .strip_prefix(input_world)
@@ -137,11 +138,6 @@ pub fn preserve(
             let destination = output_world.join(relative);
             let _ = fs::remove_dir_all(&destination);
             copy_dir_tree(source, &destination, sink)?;
-        }
-        for legacy_root in LEGACY_DIMENSION_ROOTS {
-            for kind in KINDS {
-                let _ = fs::remove_dir_all(output_world.join(legacy_root).join(kind));
-            }
         }
         for extra in EXTRA_DIRS {
             let source = input_world.join(extra);
@@ -170,6 +166,59 @@ mod tests {
             log,
             |_payload| {},
         )
+    }
+
+    #[test]
+    fn upgrade_keeps_standard_dimension_entities_and_poi() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let sink = test_sink(output.path());
+        for root in ["", "DIM-1", "DIM1", "world"] {
+            for kind in KINDS {
+                let relative = Path::new(root).join(kind).join("r.0.0.mca");
+                let source = input.path().join(&relative);
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::write(source, b"source-data").unwrap();
+            }
+        }
+        preserve(input.path(), output.path(), "1.21.10", "1.21.11", &sink).unwrap();
+        for root in ["", "DIM-1", "DIM1", "world"] {
+            for kind in KINDS {
+                let relative = Path::new(root).join(kind).join("r.0.0.mca");
+                assert_eq!(
+                    fs::read(output.path().join(&relative)).ok(),
+                    Some(b"source-data".to_vec()),
+                    "lost {}",
+                    relative.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn downgrade_backs_up_overworld_entities_and_poi() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let sink = test_sink(output.path());
+        for kind in KINDS {
+            fs::create_dir_all(input.path().join(kind)).unwrap();
+            fs::write(input.path().join(kind).join("r.0.0.mca"), b"original").unwrap();
+        }
+        assert!(preserve(input.path(), output.path(), "1.21.11", "1.20.6", &sink).unwrap());
+        for kind in KINDS {
+            assert_eq!(
+                fs::read(
+                    output
+                        .path()
+                        .join("_NWC_preserved_source")
+                        .join(kind)
+                        .join("r.0.0.mca")
+                )
+                .unwrap(),
+                b"original"
+            );
+            assert!(!output.path().join(kind).exists());
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "netease-world-converter"
-version = "2.0.0"
+version = "2.0.1"
 description = "网易 Minecraft 存档解密与 Java 版本转换器"
 authors = ["Netease World Converter contributors"]
 license = "GPL-3.0-or-later"
@@ -31,6 +31,8 @@ sysinfo = { version = "0.33", default-features = false, features = ["system", "d
 rayon = "1"
 # 桌面目录走系统 Known Folder API（兼容 OneDrive 重定向）
 dirs = "5"
+tauri-plugin-updater = "2.11.0"
+tauri-plugin-process = "2.3.1"
 
 [target.'cfg(windows)'.dependencies]
 # 子进程 Job Object（取消时终止整棵进程树）；Win32_Security 为 CreateJobObjectW 的签名依赖

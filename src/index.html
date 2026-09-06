@@ -21,7 +21,10 @@
         网易 Minecraft 存档转换器
       </h1>
       <p class="subtitle">让熟悉的世界，在新的版本继续生长。</p>
-      <span class="local-badge"><span aria-hidden="true">◈</span> 全程本地处理</span>
+      <div class="header-actions">
+        <button id="update-btn" class="update-btn" disabled>检查更新</button>
+        <span class="local-badge"><span aria-hidden="true">◈</span> 全程本地处理</span>
+      </div>
     </header>
 
     <nav id="workflow" class="workflow" data-step="1" aria-label="转换流程">
@@ -109,6 +112,7 @@
     </div>
   </dialog>
 
+  <script src="updater.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

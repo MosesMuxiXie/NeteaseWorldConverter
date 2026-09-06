@@ -43,6 +43,9 @@ jobs:
   windows-x64:
     needs: verify
     runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -75,11 +78,15 @@ jobs:
           name: windows-x64
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
   windows-arm64:
     needs: verify
     runs-on: windows-11-arm # 原生 ARM 运行器：arm64 jlink / 编译器均可直接运行
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -120,13 +127,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-arm64
-          path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
 
   macos-x64:
     needs: verify
     runs-on: macos-14 # arm64 运行器 + Rosetta 2 交叉构建 Intel 产物
     env:
       ARCH: x86_64
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -153,13 +164,18 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-x64
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.tar.gz.sig
 
   macos-arm64:
     needs: verify
     runs-on: macos-14 # Apple Silicon 运行器
     env:
       ARCH: arm64
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -185,7 +201,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz.sig
 
   release:
     needs: [windows-x64, windows-arm64, macos-x64, macos-arm64, verify]
@@ -196,7 +215,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { path: artifacts, merge-multiple: true }
+        with:
+          path: artifacts
+      - name: Build updater manifest
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path("artifacts")
+          tag = os.environ["TAG"]
+          repo = os.environ["REPOSITORY"]
+
+          def updater(dir_name, pattern):
+              matches = list((root / dir_name).glob(pattern))
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one {dir_name}/{pattern}, found {matches}")
+              sig = matches[0]
+              bundle = Path(str(sig)[:-4])
+              if not bundle.is_file():
+                  raise SystemExit(f"missing updater bundle for {sig}")
+              return {
+                  "signature": sig.read_text(encoding="utf-8").strip(),
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{bundle.name}",
+              }
+
+          manifest = {
+              "version": tag.removeprefix("v"),
+              "notes": "NeteaseWorldConverter " + tag,
+              "pub_date": None,
+              "platforms": {
+                  "windows-x86_64": updater("windows-x64", "*.exe.sig"),
+                  "windows-aarch64": updater("windows-arm64", "*.exe.sig"),
+                  "darwin-x86_64": updater("macos-x64", "*.tar.gz.sig"),
+                  "darwin-aarch64": updater("macos-arm64", "*.tar.gz.sig"),
+              },
+          }
+          (root / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          PY
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

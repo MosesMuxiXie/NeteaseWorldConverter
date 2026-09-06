@@ -5,6 +5,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getCurrentWebview } = window.__TAURI__.webview;
+const { check: checkForUpdate, downloadAndInstall } = window.__NWC_UPDATER__ || { check: async () => null, downloadAndInstall: async () => { throw new Error("自动更新不可用"); } };
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -26,6 +27,7 @@ const els = {
   start: $("start-btn"),
   save: $("save-btn"),
   report: $("report-btn"),
+  update: $("update-btn"),
   backendNote: $("backend-note"),
   dropOverlay: $("drop-overlay"),
   backdrop: $("modal-backdrop"),
@@ -160,6 +162,7 @@ function setBusy(isBusy) {
   els.start.classList.toggle("primary", !converting && !session?.result);
   els.save.disabled = isBusy || !session?.result;
   els.report.disabled = isBusy || !errorReportPath;
+  els.update.disabled = isBusy || !ready;
   els.choose.textContent = session ? "更换存档" : "选择存档";
   els.save.textContent = savedPath ? "另存一份 ZIP" : "保存 ZIP";
   $("workflow").dataset.step = session?.result ? "3" : session?.supported ? "2" : "1";
@@ -440,6 +443,34 @@ els.report.addEventListener("click", async () => {
     await invoke("open_path", { path: errorReportPath });
   } catch (err) {
     await showModal("打开失败", "无法打开错误报告：\n" + parseError(err).message, "确定");
+  }
+});
+
+// ---------- 自动更新 ----------
+
+els.update.addEventListener("click", async () => {
+  if (busy || modalResolve || !ready) return;
+  setBusy(true);
+  try {
+    setStage("正在检查更新……");
+    const update = await checkForUpdate();
+    if (!update) {
+      await showModal("已是最新版本", "当前版本 2.0.1 已是最新版本。", "确定");
+      return;
+    }
+    const notes = update.body ? `\n\n更新说明：\n${update.body}` : "";
+    if (!await showModal("发现新版本", `版本 ${update.version} 可用。${notes}\n\n现在下载并安装吗？`, "立即更新", "稍后")) return;
+    setStage(`正在下载版本 ${update.version}……`);
+    await downloadAndInstall(update, (event) => {
+      if (event?.event === "Started") setStage("正在下载更新……");
+      else if (event?.event === "Progress") setStage("正在下载更新……");
+      else if (event?.event === "Finished") setStage("正在安装更新……");
+    });
+  } catch (err) {
+    await showModal("更新失败", "无法完成自动更新：\n" + parseError(err).message, "确定");
+    setStage("更新失败", "error");
+  } finally {
+    setBusy(false);
   }
 });
 

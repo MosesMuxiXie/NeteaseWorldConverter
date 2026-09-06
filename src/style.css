@@ -15,11 +15,13 @@ body {
     radial-gradient(ellipse at 0 100%, #EEE5F1, transparent 48%), #FAF5F1;
 }
 .root { max-width: 1440px; height: 100vh; min-height: 640px; margin: auto; padding: 28px 30px 18px; display: flex; flex-direction: column; gap: 22px; }
-.header { position: relative; padding-right: 148px; }
+.header { position: relative; padding-right: 220px; }
 h1 { margin: 0; display: flex; align-items: center; gap: 10px; font: 700 23px/1.5 var(--font-title); letter-spacing: .025em; }
 .sakura-mark { width: 25px; height: 25px; flex: none; }
 .subtitle { margin: 5px 0 0 35px; color: var(--muted); font-size: 12px; letter-spacing: .06em; }
-.local-badge { position: absolute; right: 0; top: 10px; padding: 6px 12px; background: #FFFCF8A8; border: 1px solid #FFFFFF; border-radius: 30px; color: var(--success); font-size: 11px; }
+.header-actions { position: absolute; right: 0; top: 4px; display: flex; align-items: center; gap: 8px; }
+.update-btn { padding: 6px 10px; border: 1px solid #E3C7D1; background: #FFF9FB; color: var(--primary); font-size: 11px; }
+.local-badge { position: static; padding: 6px 12px; background: #FFFCF8A8; border: 1px solid #FFFFFF; border-radius: 30px; color: var(--success); font-size: 11px; }
 .local-badge span { margin-right: 5px; }
 .workflow { display: flex; align-items: center; padding: 16px 24px; border: 1px solid #FFFFFF; border-radius: 16px; background: #FFFFFF60; }
 .flow-step { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 13px; }
@@ -111,5 +113,5 @@ button.success:hover:not(:disabled) { background: #345A42; }
 @media (min-height: 850px) { .root { padding-top: 36px; gap: 28px; } .file-picker { padding-block: 30px; } #log-area { max-height: 440px; } }
 @media (max-height: 850px) and (min-width: 781px) { .root { padding: 20px 24px 14px; gap: 16px; } .workflow { padding: 12px 20px; } .card { padding: 20px; } .section-heading { margin-bottom: 14px; } .file-picker { padding: 14px; } .world-mark { width: 55px; height: 45px; margin-bottom: 8px; } }
 @media (max-height: 740px) and (min-width: 781px) { .task-panel:has(.result-card:not(.hidden)) .section-heading { display: none; } .result-card { padding: 12px; margin-bottom: 12px; max-height: 110px; } .log-panel { min-height: 60px; margin-top: 12px; } .actions { margin-top: 12px; } }
-@media (max-width: 780px) { .root { height: auto; min-height: 100vh; padding: 20px 16px; gap: 18px; } .workspace { grid-template-columns: 1fr; } #log-area { max-height: 240px; min-height: 120px; } .header { padding-right: 0; } h1 { font-size: 20px; } .local-badge { display: none; } .workflow { padding: 14px; } .step-line { margin: 0 10px; } .flow-step { gap: 6px; font-size: 11px; } .flow-step small { display: none; } .app-footer { flex-wrap: wrap; } .privacy { max-width: 100%; } }
+@media (max-width: 780px) { .root { height: auto; min-height: 100vh; padding: 20px 16px; gap: 18px; } .workspace { grid-template-columns: 1fr; } #log-area { max-height: 240px; min-height: 120px; } .header { padding-right: 0; } .header-actions { position: static; margin-top: 10px; justify-content: flex-start; } h1 { font-size: 20px; } .local-badge { display: none; } .workflow { padding: 14px; } .step-line { margin: 0 10px; } .flow-step { gap: 6px; font-size: 11px; } .flow-step small { display: none; } .app-footer { flex-wrap: wrap; } .privacy { max-width: 100%; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
