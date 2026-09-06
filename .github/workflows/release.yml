@@ -159,6 +159,11 @@ jobs:
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target x86_64-apple-darwin
+      - name: Name updater artifact by architecture
+        run: |
+          cd src-tauri/target/x86_64-apple-darwin/release/bundle/macos
+          mv NeteaseWorldConverter.app.tar.gz NeteaseWorldConverter_x64.app.tar.gz
+          mv NeteaseWorldConverter.app.tar.gz.sig NeteaseWorldConverter_x64.app.tar.gz.sig
       # 只上传 dmg：.app 是目录，upload-artifact 会把它摊平成散文件，
       # 在 release 步骤与其他产物同名冲突（LICENSE 等）导致发布失败
       - uses: actions/upload-artifact@v4
@@ -197,6 +202,11 @@ jobs:
       - run: npm install --no-audit --no-fund
       - name: Build bundles
         run: npx tauri build --target aarch64-apple-darwin
+      - name: Name updater artifact by architecture
+        run: |
+          cd src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          mv NeteaseWorldConverter.app.tar.gz NeteaseWorldConverter_arm64.app.tar.gz
+          mv NeteaseWorldConverter.app.tar.gz.sig NeteaseWorldConverter_arm64.app.tar.gz.sig
       # 同上：只上传 dmg，避免 .app 散文件污染 release
       - uses: actions/upload-artifact@v4
         with:
