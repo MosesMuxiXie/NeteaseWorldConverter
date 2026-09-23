@@ -235,7 +235,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev cmake ninja-build libfuse2
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev cmake ninja-build libfuse2 patchelf
       - name: Prepare chunker-cli.jar
         run: |
           mkdir -p src-tauri/backends
@@ -247,13 +247,23 @@ jobs:
           rm -rf src-tauri/runtime
           "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
       - run: npm ci --no-audit --no-fund
+      - name: Check AppImage toolchain
+        run: |
+          echo "patchelf: $(command -v patchelf || echo MISSING)"
+          echo "gstreamer plugins dir: $(ls -d /usr/lib/x86_64-linux-gnu/gstreamer-1.0 2>/dev/null || echo MISSING)"
+          echo "dpkg-architecture: $(command -v dpkg-architecture || echo MISSING)"
+          echo "glib-compile-schemas: $(command -v glib-compile-schemas || echo MISSING)"
       - name: Build deb and AppImage bundles
         env:
-          # linuxdeploy / linuxdeploy-plugin-appimage 自身是 AppImage；
-          # runner 上无可用 FUSE 运行时会导致 “failed to run linuxdeploy”，
-          # 用解包运行（不挂载）绕过，和上面的 libfuse2 双保险。
+          # linuxdeploy 及其插件本身都是 AppImage：无 FUSE 时靠解包运行
+          # （Tauri 内部也会设置该变量，这里显式写出便于排障）。
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles deb,appimage
+          # linuxdeploy 对 AppDir 内的库执行 strip 时可能在 .relr.dyn 段上失败，
+          # 按上游 workaround 跳过 strip。
+          NO_STRIP: "1"
+        # -v：默认日志级别下 Tauri 只报 “failed to run linuxdeploy”，
+        # 会丢弃 linuxdeploy 的 stderr；详细日志才能定位失败原因。
+        run: npx tauri build -v --target x86_64-unknown-linux-gnu --bundles deb,appimage
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
