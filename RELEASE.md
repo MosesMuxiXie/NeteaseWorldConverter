@@ -82,8 +82,9 @@
 ## 安装
 
 1. Windows 可双击 `NeteaseWorldConverter_2.0.2_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包；macOS 选择对应架构的 DMG；Linux x64 选择 `.deb` 或 AppImage。
-2. 升级：已安装 2.0.1 的用户可直接用应用内「检查更新」验签下载并自动重启安装（Windows NSIS、macOS、Linux AppImage）；`.deb` 用户请下载新版包覆盖安装。
-3. 数据全程本机处理，原始 ZIP 永不修改。
+2. Linux 提示：直接运行 AppImage 需要 FUSE 2（Ubuntu 22.04+ 可先 `sudo apt install libfuse2`）；无 FUSE 的环境可用 `./NeteaseWorldConverter_2.0.2_amd64.AppImage --appimage-extract-and-run`。`.deb` 无此依赖。
+3. 升级：已安装 2.0.1 的用户可直接用应用内「检查更新」验签下载并自动重启安装（Windows NSIS、macOS、Linux AppImage）；`.deb` 用户请下载新版包覆盖安装。
+4. 数据全程本机处理，原始 ZIP 永不修改。
 
 ## 校验
 

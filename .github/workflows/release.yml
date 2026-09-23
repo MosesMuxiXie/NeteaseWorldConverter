@@ -258,12 +258,6 @@ jobs:
           echo "LINUXDEPLOY_EXCLUDED_LIBRARIES=$libs" >> "$GITHUB_ENV"
           echo "excluded from linuxdeploy: $libs"
       - run: npm ci --no-audit --no-fund
-      - name: Check AppImage toolchain
-        run: |
-          echo "patchelf: $(command -v patchelf || echo MISSING)"
-          echo "gstreamer plugins dir: $(ls -d /usr/lib/x86_64-linux-gnu/gstreamer-1.0 2>/dev/null || echo MISSING)"
-          echo "dpkg-architecture: $(command -v dpkg-architecture || echo MISSING)"
-          echo "glib-compile-schemas: $(command -v glib-compile-schemas || echo MISSING)"
       - name: Pin linuxdeploy build that honors LINUXDEPLOY_EXCLUDED_LIBRARIES
         run: |
           set -euo pipefail
