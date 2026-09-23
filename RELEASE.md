@@ -2,11 +2,13 @@
 
 ## 2.0.2：转换阶段优化与 Linux 安装包
 
+本版是功能与性能更新：新增 Linux x64 安装包并把它接入自动更新，改进目标版本缓存的失效判断、b2j 空闲超时与转换测速工具，并用真实存档复核转换正确性。应用标识未变，Windows / macOS 可从 2.0.1 直接覆盖升级。
+
 - 去重网易 LevelDB 密钥候选并复用文件头尾数据；成功查询的目标版本列表按 Java 和 Chunker 文件变化自动失效。
 - 为长时间运行的 b2j 转换调整空闲超时，保留取消能力；增加转换分段计时和交错测速工具。
 - 在 Windows x64 上用真实存档完成 Java 1.21.10 端到端转换，校验 ZIP CRC、区域结构、区块数量和目标版本。单次耗时受缓存影响，不能将相对旧版的差值直接视为代码提速；详见 `PERFORMANCE.md`。
 - Windows b2j 源码候选版在 MSVC 19.44 上遇到 C1001 内部编译错误，仍使用已验证的原版二进制。
-- 增加 Linux x64 `.deb` 与 AppImage；从 je2be-core `web-4.3.0` 构建 Linux b2j，并提供签名的 AppImage 自动更新包。
+- 增加 Linux x64 `.deb` 与 AppImage；从 je2be-core `web-4.3.0` 构建 Linux b2j，并提供签名的 AppImage 自动更新包。`latest.json` 更新清单新增 `linux-x86_64` 条目，Linux AppImage 与 Windows / macOS 一样支持应用内「检查更新」。
 
 ## 2.0.1：实体保留修复与自动更新
 
@@ -80,7 +82,8 @@
 ## 安装
 
 1. Windows 可双击 `NeteaseWorldConverter_2.0.2_x64-setup.exe`（可选每用户 / 每机器安装，简体中文 / English）或使用 MSI 包；macOS 选择对应架构的 DMG；Linux x64 选择 `.deb` 或 AppImage。
-2. 数据全程本机处理，原始 ZIP 永不修改。
+2. 升级：已安装 2.0.1 的用户可直接用应用内「检查更新」验签下载并自动重启安装（Windows NSIS、macOS、Linux AppImage）；`.deb` 用户请下载新版包覆盖安装。
+3. 数据全程本机处理，原始 ZIP 永不修改。
 
 ## 校验
 
