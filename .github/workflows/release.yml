@@ -264,6 +264,22 @@ jobs:
           echo "gstreamer plugins dir: $(ls -d /usr/lib/x86_64-linux-gnu/gstreamer-1.0 2>/dev/null || echo MISSING)"
           echo "dpkg-architecture: $(command -v dpkg-architecture || echo MISSING)"
           echo "glib-compile-schemas: $(command -v glib-compile-schemas || echo MISSING)"
+      - name: Pin linuxdeploy build that honors LINUXDEPLOY_EXCLUDED_LIBRARIES
+        run: |
+          set -euo pipefail
+          # Tauri 自带的 linuxdeploy 快照（2024-07-26）不读取排除变量，
+          # 遇到随包 JRE 的 libjvm.so 会直接以
+          # “Could not find dependency: libjvm.so” 终止打包。
+          # 预置带该支持的 continuous 构建（2026-08-01）到 Tauri 的缓存路径：
+          # Tauri 只在文件不存在时才下载，因此这里放好后即被使用；
+          # 并用 sha256 固定内容，上游替换产物时构建会显式失败而不是静默换版。
+          target="$HOME/.cache/tauri/linuxdeploy-x86_64.AppImage"
+          mkdir -p "$(dirname "$target")"
+          curl -fL --retry 3 -o "$target" \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          echo "36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62  $target" | sha256sum -c -
+          chmod +x "$target"
+          ls -l "$target"
       - name: Build deb and AppImage bundles
         env:
           # linuxdeploy 及其插件本身都是 AppImage：无 FUSE 时靠解包运行
