@@ -246,6 +246,17 @@ jobs:
         run: |
           rm -rf src-tauri/runtime
           "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+      - name: Exclude bundled JRE libs from linuxdeploy scan
+        run: |
+          set -euo pipefail
+          # linuxdeploy 会扫描 AppDir 内的 ELF 并解析依赖；jlink 运行时自带的
+          # libjvm.so / libjli.so 等私有库互相引用，ldd 无法从各自 RUNPATH 解析，
+          # 默认会以 “Could not find dependency: libjvm.so” 终止打包。
+          # 这些库由随包 JRE 提供，应让 linuxdeploy 直接跳过。
+          libs=$(find src-tauri/runtime -type f -name '*.so*' -printf '%f\n' | sed -E 's/\.so.*$/.so/' | sort -u | paste -sd';')
+          if [ -z "$libs" ]; then echo "未找到 jlink 运行时库"; exit 1; fi
+          echo "LINUXDEPLOY_EXCLUDED_LIBRARIES=$libs" >> "$GITHUB_ENV"
+          echo "excluded from linuxdeploy: $libs"
       - run: npm ci --no-audit --no-fund
       - name: Check AppImage toolchain
         run: |
@@ -258,8 +269,8 @@ jobs:
           # linuxdeploy 及其插件本身都是 AppImage：无 FUSE 时靠解包运行
           # （Tauri 内部也会设置该变量，这里显式写出便于排障）。
           APPIMAGE_EXTRACT_AND_RUN: "1"
-          # linuxdeploy 对 AppDir 内的库执行 strip 时可能在 .relr.dyn 段上失败，
-          # 按上游 workaround 跳过 strip。
+          # 预防性保留：上游对 strip 在 .relr.dyn 段上失败的 workaround。
+          # 本次打包失败的直接原因不是它，而是上面被排除的 JRE 库依赖解析。
           NO_STRIP: "1"
         # -v：默认日志级别下 Tauri 只报 “failed to run linuxdeploy”，
         # 会丢弃 linuxdeploy 的 stderr；详细日志才能定位失败原因。
