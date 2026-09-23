@@ -363,17 +363,16 @@ pub fn list_target_versions(app: &tauri::AppHandle) -> Vec<TargetVersion> {
     static CACHE: OnceLock<TargetCache> = OnceLock::new();
     let paths = locate(app);
     if let Some(chunker) = &paths.chunker {
-        if let Some(key) = paths
-            .java
-            .as_deref()
-            .and_then(|java| TargetCacheKey::from_paths(java, chunker))
-        {
-            return cached_target_query(CACHE.get_or_init(|| Mutex::new(None)), key, || {
-                java_available(&paths)
-                    .then(|| query_chunker(paths.java.as_deref(), chunker))
-                    .flatten()
-            })
-            .unwrap_or_else(builtin_targets);
+        let search_paths = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(java) = resolve_query_java(paths.java.as_deref(), search_paths) {
+            if let Some(key) = TargetCacheKey::from_paths(&java, chunker) {
+                return cached_target_query(CACHE.get_or_init(|| Mutex::new(None)), key, || {
+                    java_version(&java).and_then(|_| query_chunker(Some(&java), chunker))
+                })
+                .unwrap_or_else(builtin_targets);
+            }
         }
         if java_available(&paths) {
             if let Some(list) = query_chunker(paths.java.as_deref(), chunker) {
@@ -382,6 +381,20 @@ pub fn list_target_versions(app: &tauri::AppHandle) -> Vec<TargetVersion> {
         }
     }
     builtin_targets()
+}
+
+fn resolve_query_java(
+    bundled: Option<&Path>,
+    search_paths: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(java) = bundled {
+        return Some(java.to_path_buf());
+    }
+    let name = if cfg!(windows) { "java.exe" } else { "java" };
+    search_paths
+        .into_iter()
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -968,6 +981,37 @@ mod tests {
         };
         assert!(super::cached_target_query(&cache, key.clone(), query).is_none());
         assert!(super::cached_target_query(&cache, key, query).is_some());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn system_java_fallback_is_cached_and_invalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let java = bin.join(if cfg!(windows) { "java.exe" } else { "java" });
+        let chunker = dir.path().join("chunker-cli.jar");
+        fs::write(&java, b"java-v1").unwrap();
+        fs::write(&chunker, b"chunker").unwrap();
+        let search = || [dir.path().join("missing"), bin.clone()];
+        let resolved = super::resolve_query_java(None, search()).unwrap();
+        assert_eq!(resolved, java);
+
+        let cache = Mutex::new(None);
+        let calls = Cell::new(0);
+        let query = || {
+            calls.set(calls.get() + 1);
+            Some(builtin_targets())
+        };
+        let key = super::TargetCacheKey::from_paths(&resolved, &chunker).unwrap();
+        super::cached_target_query(&cache, key.clone(), query).unwrap();
+        super::cached_target_query(&cache, key.clone(), query).unwrap();
+        assert_eq!(calls.get(), 1);
+
+        fs::write(&java, b"java-v2-longer").unwrap();
+        let changed_java = super::TargetCacheKey::from_paths(&resolved, &chunker).unwrap();
+        assert_ne!(key, changed_java);
+        super::cached_target_query(&cache, changed_java, query).unwrap();
         assert_eq!(calls.get(), 2);
     }
 
