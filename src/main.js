@@ -455,7 +455,7 @@ els.update.addEventListener("click", async () => {
     setStage("正在检查更新……");
     const update = await checkForUpdate();
     if (!update) {
-      await showModal("已是最新版本", "当前版本 2.0.1 已是最新版本。", "确定");
+      await showModal("已是最新版本", "当前版本 2.0.2 已是最新版本。", "确定");
       return;
     }
     const notes = update.body ? `\n\n更新说明：\n${update.body}` : "";

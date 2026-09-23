@@ -8,6 +8,7 @@
   - Windows x64：复用原便携包 `app/native/b2j.exe`（连同 `libc++.dll`、`libunwind.dll`）
   - Windows arm64：复用 x64 版 b2j（Windows 11 ARM 提供 x64 模拟层；je2be-core 暂未发布 Windows arm64 二进制）
   - macOS：`bash scripts/build-b2j-macos.sh` 从源码 CMake 构建（Intel / Apple Silicon 均为本机构建）
+  - Linux x64：`bash scripts/build-b2j-linux.sh` 从源码 CMake 构建
 - `runtime/` — jlink Java 运行时（Chunker 子进程使用，同目录 `../runtime`）。生成方式见 `src-tauri/runtime/README.md`。
 
-CI（`.github/workflows/release.yml`）在 macOS 运行器上自动执行上述步骤后调用 `tauri build --target <arch>`。
+CI（`.github/workflows/release.yml`）在 macOS 和 Linux 运行器上自动构建各自的 b2j 后调用 `tauri build --target <arch>`。

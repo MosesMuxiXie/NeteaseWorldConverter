@@ -1,4 +1,4 @@
-# release.yml — 多平台发布：Windows x64 / Windows arm64 / macOS x64 / macOS arm64
+# release.yml — 多平台发布：Windows x64 / Windows arm64 / macOS x64 / macOS arm64 / Linux x64
 # 手动触发（Actions → Release builds → Run workflow）或打 v* tag 自动触发。
 # tag 触发时最后会创建 GitHub Release 并附上全部安装包。
 
@@ -25,6 +25,8 @@ jobs:
         with: { node-version: 20 }
       - name: Frontend workflow tests
         run: node scripts/ui-flow-test.mjs
+      - name: Conversion benchmark tests
+        run: node --test scripts/bench-b2j.test.mjs scripts/profile-conversion.test.mjs
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "clippy,rustfmt" }
       - name: Install Linux system deps (tauri 编译需要 GTK/WebKit)
@@ -216,8 +218,48 @@ jobs:
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.tar.gz.sig
 
+  linux-x64:
+    needs: verify
+    runs-on: ubuntu-22.04
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-gnu }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: "21", architecture: x64 }
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev cmake ninja-build
+      - name: Prepare chunker-cli.jar
+        run: |
+          mkdir -p src-tauri/backends
+          curl -fL "$CHUNKER_JAR_URL" -o src-tauri/backends/chunker-cli.jar
+      - name: Build Linux b2j from source
+        run: bash scripts/build-b2j-linux.sh "$JE2BE_VERSION"
+      - name: Prepare runtime (jlink)
+        run: |
+          rm -rf src-tauri/runtime
+          "$JAVA_HOME/bin/jlink" --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported,jdk.crypto.ec --no-header-files --no-man-pages --compress=zip-9 --output src-tauri/runtime
+      - run: npm ci --no-audit --no-fund
+      - name: Build deb and AppImage bundles
+        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles deb,appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz.sig
+
   release:
-    needs: [windows-x64, windows-arm64, macos-x64, macos-arm64, verify]
+    needs: [windows-x64, windows-arm64, macos-x64, macos-arm64, linux-x64, verify]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -264,6 +306,7 @@ jobs:
                   "windows-aarch64": updater("windows-arm64", "*.exe.sig"),
                   "darwin-x86_64": updater("macos-x64", "*.tar.gz.sig"),
                   "darwin-aarch64": updater("macos-arm64", "*.tar.gz.sig"),
+                  "linux-x86_64": updater("linux-x64", "*.AppImage.tar.gz.sig"),
               },
           }
           (root / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
