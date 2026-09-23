@@ -255,8 +255,7 @@ jobs:
           path: |
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.tar.gz.sig
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig
 
   release:
     needs: [windows-x64, windows-arm64, macos-x64, macos-arm64, linux-x64, verify]
@@ -306,7 +305,7 @@ jobs:
                   "windows-aarch64": updater("windows-arm64", "*.exe.sig"),
                   "darwin-x86_64": updater("macos-x64", "*.tar.gz.sig"),
                   "darwin-aarch64": updater("macos-arm64", "*.tar.gz.sig"),
-                  "linux-x86_64": updater("linux-x64", "*.AppImage.tar.gz.sig"),
+                  "linux-x86_64": updater("linux-x64", "*.AppImage.sig"),
               },
           }
           (root / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
