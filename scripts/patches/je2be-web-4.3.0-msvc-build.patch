@@ -1,0 +1,16 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6cfacf1..cbd3856 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -14,10 +14,9 @@ if ("${CMAKE_PROJECT_NAME}" STREQUAL "${PROJECT_NAME}")
+       /source-charset:utf-8
+       /we4828 # Treat "The file contains a character that cannot be represented in the current code page" warnings as errors
+       /wd4100 # Suppress "unreferenced formal parameter" warnings
+-      /MP
+       /Zc:__cplusplus # Enable updated __cplusplus macro
+       /Zc:preprocessor # Enable preprocessor conformance mode
+-      /ZI
++      /Zi
+     )
+     if (JE2BE_CORE_USE_INTEL_COMPILER)
+       add_link_options(

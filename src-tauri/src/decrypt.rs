@@ -6,11 +6,12 @@ use crate::error::{conv, Result};
 use crate::log::AppLog;
 use crate::models::{WorldInfo, WorldType};
 use crate::sink::Sink;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use rayon::prelude::*;
 
@@ -65,12 +66,15 @@ pub fn prepare(world: &WorldInfo, output: &Path, sink: &Sink) -> Result<()> {
 
     let mut key: Option<Vec<u8>> = None;
     if encrypted {
+        let stage_start = Instant::now();
         let recovery = recover_key(&db_files, &manifest_name, log)?;
         log.info(&format!(
-            "恢复网易 XOR 密钥：{}；LevelDB footer 一致 {}/{}",
-            crate::archive::hex(&recovery.key),
-            recovery.valid_footers,
-            recovery.encrypted_ldb
+            "PERF key_recovery_ms={}",
+            stage_start.elapsed().as_millis()
+        ));
+        log.info(&format!(
+            "恢复网易 XOR 密钥；LevelDB footer 一致 {}/{}",
+            recovery.valid_footers, recovery.encrypted_ldb
         ));
         key = Some(recovery.key);
     }
@@ -256,54 +260,82 @@ struct KeyRecovery {
     valid_footers: usize,
 }
 
+struct EncryptedLdbFooter {
+    plain_length: u64,
+    tail: Option<[u8; 8]>,
+}
+
+struct KeyRecoveryInputs {
+    candidates: Vec<Vec<u8>>,
+    encrypted_ldb: Vec<EncryptedLdbFooter>,
+}
+
+fn collect_key_recovery_inputs(
+    files: &BTreeMap<String, PathBuf>,
+    manifest_name: &str,
+) -> Result<KeyRecoveryInputs> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(current) = files.get("CURRENT") {
+        let encrypted = fs::read(current)?;
+        if encrypted.starts_with(&NETEASE_HEADER) {
+            let plain = format!("{manifest_name}\n").into_bytes();
+            if encrypted.len() - NETEASE_HEADER.len() == plain.len() {
+                let raw: Vec<u8> = plain
+                    .iter()
+                    .enumerate()
+                    .map(|(index, byte)| encrypted[index + NETEASE_HEADER.len()] ^ byte)
+                    .collect();
+                let candidate = shortest_period(&raw);
+                if seen.insert(candidate.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    let mut encrypted_ldb = Vec::new();
+    for (name, path) in files {
+        if !name.to_lowercase().ends_with(".ldb") {
+            continue;
+        }
+        let Some(footer) = snapshot_encrypted_ldb(path)? else {
+            continue;
+        };
+        if let Some(candidate) = recover_eight_byte_key_from_footer(&footer) {
+            if seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+        encrypted_ldb.push(footer);
+    }
+    Ok(KeyRecoveryInputs {
+        candidates,
+        encrypted_ldb,
+    })
+}
+
 fn recover_key(
     files: &BTreeMap<String, PathBuf>,
     manifest_name: &str,
     log: &AppLog,
 ) -> Result<KeyRecovery> {
-    let mut candidates: Vec<Vec<u8>> = Vec::new();
-    if let Some(current) = files.get("CURRENT") {
-        if starts_with_header(current, &NETEASE_HEADER) {
-            let encrypted = fs::read(current)?;
-            let plain = format!("{manifest_name}\n").into_bytes();
-            if encrypted.len() as i64 - NETEASE_HEADER.len() as i64 == plain.len() as i64 {
-                let mut raw = vec![0u8; plain.len()];
-                for (index, byte) in plain.iter().enumerate() {
-                    raw[index] = encrypted[index + NETEASE_HEADER.len()] ^ byte;
-                }
-                candidates.push(shortest_period(&raw));
-            }
-        }
-    }
-
-    let mut ldb_candidates: BTreeMap<String, usize> = BTreeMap::new();
-    let mut encrypted_ldb = 0usize;
-    for (name, path) in files {
-        if !name.to_lowercase().ends_with(".ldb") || !starts_with_header(path, &NETEASE_HEADER) {
-            continue;
-        }
-        encrypted_ldb += 1;
-        if let Some(candidate) = recover_eight_byte_key_from_footer(path)? {
-            *ldb_candidates
-                .entry(crate::archive::hex(&candidate))
-                .or_insert(0) += 1;
-            candidates.push(candidate);
-        }
-    }
-    if candidates.is_empty() {
+    let inputs = collect_key_recovery_inputs(files, manifest_name)?;
+    if inputs.candidates.is_empty() {
         return conv("无法从 CURRENT 或 .ldb footer 恢复网易 XOR 密钥");
     }
 
     let mut best: Option<Vec<u8>> = None;
     let mut best_valid = -1i64;
-    for candidate in &candidates {
-        let valid = count_valid_encrypted_footers(files, candidate)? as i64;
+    for candidate in &inputs.candidates {
+        let valid = count_valid_encrypted_footers(&inputs.encrypted_ldb, candidate) as i64;
         if valid > best_valid {
             best_valid = valid;
             best = Some(candidate.clone());
         }
     }
     let best = best.unwrap();
+    let encrypted_ldb = inputs.encrypted_ldb.len();
     if encrypted_ldb > 0 && best_valid == 0 {
         return conv("候选密钥无法通过任何 LevelDB footer 校验");
     }
@@ -328,51 +360,60 @@ fn read_tail(path: &Path, count: usize) -> Result<Vec<u8>> {
     Ok(tail)
 }
 
-fn recover_eight_byte_key_from_footer(file: &Path) -> Result<Option<Vec<u8>>> {
+fn snapshot_encrypted_ldb(file: &Path) -> Result<Option<EncryptedLdbFooter>> {
     let size = fs::metadata(file)?.len();
-    let plain_length = size as i64 - NETEASE_HEADER.len() as i64;
-    if plain_length < LEVELDB_FOOTER.len() as i64 {
+    if size < NETEASE_HEADER.len() as u64 {
         return Ok(None);
     }
-    let tail = read_tail(file, LEVELDB_FOOTER.len())?;
-    let plain_offset = plain_length - LEVELDB_FOOTER.len() as i64;
+    let mut input = fs::File::open(file)?;
+    let mut header = [0u8; 4];
+    input.read_exact(&mut header)?;
+    if header != NETEASE_HEADER {
+        return Ok(None);
+    }
+    let plain_length = size - NETEASE_HEADER.len() as u64;
+    let tail = if plain_length >= LEVELDB_FOOTER.len() as u64 {
+        let mut tail = [0u8; 8];
+        std::io::Seek::seek(&mut input, std::io::SeekFrom::End(-8))?;
+        input.read_exact(&mut tail)?;
+        Some(tail)
+    } else {
+        None
+    };
+    Ok(Some(EncryptedLdbFooter { plain_length, tail }))
+}
+
+fn recover_eight_byte_key_from_footer(footer: &EncryptedLdbFooter) -> Option<Vec<u8>> {
+    let tail = footer.tail?;
+    let plain_offset = footer.plain_length - LEVELDB_FOOTER.len() as u64;
     // 密钥 8 字节按环形相位放置：key[(plainOffset+i) % 8] = tail[i] ^ footer[i]
     let mut key = [0u8; 8];
     for index in 0..8 {
-        let key_index = ((plain_offset + index as i64) % 8) as usize;
+        let key_index = ((plain_offset + index as u64) % 8) as usize;
         key[key_index] = tail[index] ^ LEVELDB_FOOTER[index];
     }
-    Ok(Some(key.to_vec()))
+    Some(key.to_vec())
 }
 
-fn encrypted_footer_matches(file: &Path, key: &[u8]) -> Result<bool> {
-    let size = fs::metadata(file)?.len();
-    let plain_length = size as i64 - NETEASE_HEADER.len() as i64;
-    if plain_length < 8 {
-        return Ok(false);
-    }
-    let tail = read_tail(file, 8)?;
-    let offset = plain_length - 8;
+fn encrypted_footer_matches(footer: &EncryptedLdbFooter, key: &[u8]) -> bool {
+    let Some(tail) = footer.tail else {
+        return false;
+    };
+    let offset = footer.plain_length - 8;
     for index in 0..8 {
-        let plain = tail[index] ^ key[((offset + index as i64) % key.len() as i64) as usize];
+        let plain = tail[index] ^ key[((offset + index as u64) % key.len() as u64) as usize];
         if plain != LEVELDB_FOOTER[index] {
-            return Ok(false);
+            return false;
         }
     }
-    Ok(true)
+    true
 }
 
-fn count_valid_encrypted_footers(files: &BTreeMap<String, PathBuf>, key: &[u8]) -> Result<usize> {
-    let mut valid = 0;
-    for (name, path) in files {
-        if name.to_lowercase().ends_with(".ldb")
-            && starts_with_header(path, &NETEASE_HEADER)
-            && encrypted_footer_matches(path, key)?
-        {
-            valid += 1;
-        }
-    }
-    Ok(valid)
+fn count_valid_encrypted_footers(files: &[EncryptedLdbFooter], key: &[u8]) -> usize {
+    files
+        .iter()
+        .filter(|footer| encrypted_footer_matches(footer, key))
+        .count()
 }
 
 fn shortest_period(raw: &[u8]) -> Vec<u8> {
@@ -552,6 +593,29 @@ mod tests {
         assert_eq!(
             fs::read(output.join("level.dat")).unwrap(),
             b"bedrock-level"
+        );
+        let log = fs::read_to_string(world_dir.path().join("test-conversion.log")).unwrap();
+        assert!(!log.contains(&crate::archive::hex(&key)));
+    }
+
+    #[test]
+    fn recovery_deduplicates_keys_and_reuses_footer_snapshots() {
+        let key = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let world = tempfile::tempdir().unwrap();
+        build_world(world.path(), &key);
+        let db = world.path().join("db");
+        for index in 2..=16 {
+            fs::copy(db.join("000001.ldb"), db.join(format!("{index:06}.ldb"))).unwrap();
+        }
+        let files = super::collect_database_files(world.path(), &db);
+        let inputs = super::collect_key_recovery_inputs(&files, "MANIFEST-000001").unwrap();
+        assert_eq!(inputs.candidates, vec![key.to_vec()]);
+        assert_eq!(inputs.encrypted_ldb.len(), 16);
+
+        fs::remove_file(db.join("000001.ldb")).unwrap();
+        assert_eq!(
+            super::count_valid_encrypted_footers(&inputs.encrypted_ldb, &key),
+            16
         );
     }
 

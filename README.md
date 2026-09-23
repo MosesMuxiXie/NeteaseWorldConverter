@@ -73,6 +73,7 @@ npm run build
 ## 测试
 
 - **单元测试**：`cargo test --manifest-path src-tauri\Cargo.toml`（解密、Anvil 验证、版本比较、实体保留、资源统计、原始存档保护与安全保存）。
+- **真实存档性能复测**：见 [`PERFORMANCE.md`](PERFORMANCE.md)，包含应用端到端分段计时、b2j 交错测试和 Windows x64 源码构建方法。
 - **前端流程回归**：`node scripts/ui-flow-test.mjs`（事件订阅、重复点击、保存取消、未保存结果、取消与重试；无需额外依赖）。
 - **端到端（推荐）**：用 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` 启动应用后：
   - `node scripts/make-test-world.mjs` — 生成最小 Java 1.21 测试世界 ZIP

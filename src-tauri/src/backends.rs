@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::Manager;
 
@@ -25,6 +25,18 @@ const LEGACY_MINOR_RANGE: std::ops::RangeInclusive<i32> = 12..=21;
 
 /// 后端无输出的心跳上限：超过即认为挂死，终止并报错（用户仍可随时手动取消）。
 const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(600);
+const B2J_NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(1800);
+
+fn backend_no_output_timeout(program: &Path) -> Duration {
+    let name = program
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase());
+    if matches!(name.as_deref(), Some("b2j" | "b2j.exe")) {
+        B2J_NO_OUTPUT_TIMEOUT
+    } else {
+        NO_OUTPUT_TIMEOUT
+    }
+}
 
 /// 进程退出后收尾阶段的宽限：正常后端足以把退出前的输出行收完；
 /// 超过仍未见 reader 断开即视为异常（如孙进程持续占住管道），不再无限等待。
@@ -348,8 +360,21 @@ fn java_available(paths: &BackendPaths) -> bool {
 
 /// 可用目标版本列表：优先询问 Chunker，失败回退内置清单。
 pub fn list_target_versions(app: &tauri::AppHandle) -> Vec<TargetVersion> {
+    static CACHE: OnceLock<TargetCache> = OnceLock::new();
     let paths = locate(app);
     if let Some(chunker) = &paths.chunker {
+        if let Some(key) = paths
+            .java
+            .as_deref()
+            .and_then(|java| TargetCacheKey::from_paths(java, chunker))
+        {
+            return cached_target_query(CACHE.get_or_init(|| Mutex::new(None)), key, || {
+                java_available(&paths)
+                    .then(|| query_chunker(paths.java.as_deref(), chunker))
+                    .flatten()
+            })
+            .unwrap_or_else(builtin_targets);
+        }
         if java_available(&paths) {
             if let Some(list) = query_chunker(paths.java.as_deref(), chunker) {
                 return list;
@@ -357,6 +382,57 @@ pub fn list_target_versions(app: &tauri::AppHandle) -> Vec<TargetVersion> {
         }
     }
     builtin_targets()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl FileFingerprint {
+    fn from_path(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetCacheKey {
+    java: FileFingerprint,
+    chunker: FileFingerprint,
+}
+
+type TargetCache = Mutex<Option<(TargetCacheKey, Vec<TargetVersion>)>>;
+
+impl TargetCacheKey {
+    fn from_paths(java: &Path, chunker: &Path) -> Option<Self> {
+        Some(Self {
+            java: FileFingerprint::from_path(java)?,
+            chunker: FileFingerprint::from_path(chunker)?,
+        })
+    }
+}
+
+fn cached_target_query(
+    cache: &TargetCache,
+    key: TargetCacheKey,
+    query: impl FnOnce() -> Option<Vec<TargetVersion>>,
+) -> Option<Vec<TargetVersion>> {
+    let mut cached = cache.lock().ok()?;
+    if let Some((previous, targets)) = cached.as_ref() {
+        if previous == &key {
+            return Some(targets.clone());
+        }
+    }
+    let targets = query()?;
+    *cached = Some((key, targets.clone()));
+    Some(targets)
 }
 
 static TARGET_RE: OnceLock<Regex> = OnceLock::new();
@@ -582,7 +658,7 @@ fn push_last_line(last_lines: &mut VecDeque<String>, line: String) {
 }
 
 /// 通用子进程执行：合并 stdout/stderr 逐行写日志；250ms 轮询取消；
-/// 超过 NO_OUTPUT_TIMEOUT 无输出视为挂死并终止。
+/// 超过后端对应的无输出上限视为挂死并终止。
 #[allow(clippy::too_many_arguments)]
 pub fn run_process(
     program: &Path,
@@ -655,6 +731,7 @@ pub fn run_process(
         .unwrap_or_else(|| program.display().to_string());
     let mut last_lines: VecDeque<String> = VecDeque::with_capacity(30);
     let mut last_output = Instant::now();
+    let no_output_timeout = backend_no_output_timeout(program);
     // exit_status 变为 Some 后并不立即返回：继续收线直到 receiver 断开
     // （两个 reader 线程均已结束且队列排空），保证进程退出瞬间仍在管道/
     // 读线程中的最后几行也进入 last_lines，避免错误尾巴竞态丢失。
@@ -696,7 +773,7 @@ pub fn run_process(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_output.elapsed() > NO_OUTPUT_TIMEOUT {
+                if last_output.elapsed() > no_output_timeout {
                     match exit_status {
                         None => {
                             sink.log
@@ -706,7 +783,7 @@ pub fn run_process(
                                 CODE_TIMEOUT,
                                 format!(
                                     "{program_name} 超过 {} 分钟无输出，已终止",
-                                    NO_OUTPUT_TIMEOUT.as_secs() / 60
+                                    no_output_timeout.as_secs() / 60
                                 ),
                             );
                         }
@@ -735,7 +812,7 @@ pub fn run_process(
                     match child.lock().unwrap().try_wait() {
                         Ok(Some(status)) => break Some(status),
                         Ok(None) => {
-                            if last_output.elapsed() > NO_OUTPUT_TIMEOUT {
+                            if last_output.elapsed() > no_output_timeout {
                                 sink.log.warn(&format!(
                                     "{program_name} 输出结束后长时间不退出，终止进程"
                                 ));
@@ -821,6 +898,10 @@ fn terminate(child: &Mutex<Child>) {
 #[cfg(test)]
 mod tests {
     use super::{aggregate_usage, builtin_targets, parse_target_token};
+    use std::cell::Cell;
+    use std::fs;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     #[test]
     fn aggregate_usage_normalizes_cpu_and_sums_memory() {
@@ -844,5 +925,61 @@ mod tests {
         let targets = builtin_targets();
         assert!(targets.iter().any(|t| t.chunker_format == "JAVA_26_3"));
         assert_eq!(targets.first().unwrap().chunker_format, "JAVA_26_3");
+    }
+
+    #[test]
+    fn target_cache_skips_repeat_query_and_invalidates_on_binary_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let java = dir.path().join("java.exe");
+        let chunker = dir.path().join("chunker-cli.jar");
+        fs::write(&java, b"java-v1").unwrap();
+        fs::write(&chunker, b"chunker-v1").unwrap();
+        let cache = Mutex::new(None);
+        let calls = Cell::new(0);
+        let query = || {
+            calls.set(calls.get() + 1);
+            Some(builtin_targets())
+        };
+        let key = super::TargetCacheKey::from_paths(&java, &chunker).unwrap();
+        super::cached_target_query(&cache, key.clone(), query).unwrap();
+        super::cached_target_query(&cache, key.clone(), query).unwrap();
+        assert_eq!(calls.get(), 1);
+
+        fs::write(&chunker, b"chunker-v2-longer").unwrap();
+        let changed = super::TargetCacheKey::from_paths(&java, &chunker).unwrap();
+        assert_ne!(key, changed);
+        super::cached_target_query(&cache, changed, query).unwrap();
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn target_cache_retries_after_query_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let java = dir.path().join("java.exe");
+        let chunker = dir.path().join("chunker-cli.jar");
+        fs::write(&java, b"java").unwrap();
+        fs::write(&chunker, b"chunker").unwrap();
+        let key = super::TargetCacheKey::from_paths(&java, &chunker).unwrap();
+        let cache = Mutex::new(None);
+        let calls = Cell::new(0);
+        let query = || {
+            calls.set(calls.get() + 1);
+            (calls.get() > 1).then(builtin_targets)
+        };
+        assert!(super::cached_target_query(&cache, key.clone(), query).is_none());
+        assert!(super::cached_target_query(&cache, key, query).is_some());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn b2j_has_longer_idle_deadline_than_chunker() {
+        assert_eq!(
+            super::backend_no_output_timeout(std::path::Path::new("b2j.exe")),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            super::backend_no_output_timeout(std::path::Path::new("java.exe")),
+            Duration::from_secs(600)
+        );
     }
 }

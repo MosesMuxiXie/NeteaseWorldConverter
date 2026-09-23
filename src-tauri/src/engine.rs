@@ -22,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tempfile::TempDir;
 
@@ -147,6 +147,7 @@ fn new_sink(
 // ---------- 分析 ----------
 
 pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
+    let analyze_start = Instant::now();
     let input = input.to_path_buf();
     let name = file_name(&input);
     let lower = name.to_lowercase();
@@ -168,7 +169,12 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
 
     sink.update(1, "读取 ZIP", "计算 SHA-256");
     log.info(&format!("输入文件：{}", input.display()));
+    let stage_start = Instant::now();
     let hash = sha256(&input)?;
+    log.info(&format!(
+        "PERF sha256_ms={}",
+        stage_start.elapsed().as_millis()
+    ));
     log.info(&format!("SHA-256：{hash}"));
 
     let extracted = temp_path.join("extracted");
@@ -191,14 +197,24 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
     } else {
         let zip_size = fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
         ensure_free_space(&temp_path, zip_size * 3 + 256 * 1024 * 1024, "解压临时目录")?;
+        let stage_start = Instant::now();
         extract_zip(&input, &extracted, &sink)?;
+        log.info(&format!(
+            "PERF extract_ms={}",
+            stage_start.elapsed().as_millis()
+        ));
 
         sink.update(12, "识别存档", "正在分析目录结构");
         detect::detect(&extracted, &log)?
     };
     sink.update(12, "解析成功", &world.detected_version);
 
+    let stage_start = Instant::now();
     let targets = backends::list_target_versions(app);
+    log.info(&format!(
+        "PERF target_list_ms={}",
+        stage_start.elapsed().as_millis()
+    ));
     log.info(&format!("可用目标版本：{} 个", targets.len()));
 
     let supported = match world.world_type {
@@ -223,6 +239,11 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
     } else {
         None
     };
+
+    log.info(&format!(
+        "PERF analyze_ms={}",
+        analyze_start.elapsed().as_millis()
+    ));
 
     let session = Arc::new(Session {
         session_id: session_id.clone(),
@@ -260,6 +281,7 @@ pub fn analyze(app: &AppHandle, input: &Path) -> Result<AnalysisDto> {
 // ---------- 转换 ----------
 
 pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<ConversionResultDto> {
+    let convert_start = Instant::now();
     let session = find_session(session_id)?;
     let _convert_guard = ConvertGuard::acquire(&session.converting)?;
     // 取消属于上一次操作；取得独占权之后才允许开始新的转换。
@@ -356,13 +378,23 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
             chunker_out
         }
         _ => {
+            let stage_start = Instant::now();
             decrypt::prepare(&session.world, &bedrock_out, &sink)?;
+            sink.log.info(&format!(
+                "PERF bedrock_prepare_ms={}",
+                stage_start.elapsed().as_millis()
+            ));
             let paths = backends::locate(app);
             let b2j = paths
                 .b2j
                 .as_ref()
                 .ok_or_else(|| ConversionError::from("未找到 b2j 后端，请先运行资源准备脚本"))?;
+            let stage_start = Instant::now();
             backends::run_je2be(b2j, &bedrock_out, &je2be_out, &sink)?;
+            sink.log.info(&format!(
+                "PERF b2j_ms={}",
+                stage_start.elapsed().as_millis()
+            ));
             preserve_bedrock_assets(&bedrock_out, &je2be_out, &sink, false)?;
             if parse_version(&target_version) == Some(JE2BE_INTERMEDIATE) {
                 je2be_out
@@ -410,7 +442,12 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     };
 
     sink.update(85, "验证输出", "检查 Anvil 区域结构");
+    let stage_start = Instant::now();
     let validation = validate::validate(&final_world, &sink)?;
+    sink.log.info(&format!(
+        "PERF validate_ms={}",
+        stage_start.elapsed().as_millis()
+    ));
 
     // 与原版一致：转换统计写入输出世界根目录，随 ZIP 一起交付
     let region_note = if notes.is_empty() {
@@ -448,7 +485,12 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
     let base = safe_folder_name(&strip_extension(&file_name(&session.input_zip)));
     let zip_name = format!("{base}-{}.zip", target_version.replace(' ', "_"));
     let result_zip = session.temp_dir.path().join(&zip_name);
+    let stage_start = Instant::now();
     create_zip(&final_world, &result_zip, &folder_name, &sink)?;
+    sink.log.info(&format!(
+        "PERF zip_ms={}",
+        stage_start.elapsed().as_millis()
+    ));
     sink.update(100, "完成", "转换成功");
 
     sink.log.info(&format!(
@@ -467,6 +509,11 @@ pub fn convert(app: &AppHandle, session_id: &str, target: &str) -> Result<Conver
         region_note: region_note.clone(),
     };
     *session.result.lock().unwrap() = Some(stored);
+
+    sink.log.info(&format!(
+        "PERF convert_ms={}",
+        convert_start.elapsed().as_millis()
+    ));
 
     Ok(ConversionResultDto {
         result_zip: result_zip.display().to_string(),
