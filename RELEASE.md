@@ -31,7 +31,7 @@
 | Windows x64 | NSIS（`*-setup.exe`）/ MSI | CI 构建 |
 | Windows arm64 | NSIS（`*-arm64-setup.exe`） | 原生 arm64 应用与 Java 运行时；b2j 优先源码构建原生 arm64 版，失败回退 vendored x64（经 Win11 ARM 模拟层运行） |
 | macOS x64 / arm64 | `.dmg` | CI 构建；b2j 从 je2be-core 源码本机构建 |
-| Linux x64 | `.deb` / `.AppImage` | CI 在 Ubuntu 22.04 构建；b2j 从 je2be-core 源码构建 |
+| Linux x64 | `.deb` / `.AppImage` | CI 在 Ubuntu 22.04 构建；b2j 从 je2be-core 源码构建。最低兼容基线为 Ubuntu 22.04 / glibc 2.35 |
 
 五个平台统一由 `.github/workflows/release.yml` 构建：`verify` 任务先跑前端流程回归、测速脚本测试、`cargo fmt --check`、`cargo clippy -D warnings` 和 `cargo test`，全部通过后才开始出安装包。
 
